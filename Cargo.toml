@@ -1,0 +1,3 @@
+[workspace]
+members = ["re_viewer", "re_redap_browser"]
+resolver = "3"
