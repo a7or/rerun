@@ -17,6 +17,15 @@
         "Remove the exact = prefix from the wasm-bindgen 0.2.126 dependency in normalized Cargo.toml.",
         "Omit original registry .cargo_vcs_info.json; Git records fork provenance."
       ]
+    },
+    "rerun-cli": {
+      "version": "0.40.0",
+      "archive_sha256": "f13193e80c8172738ceae731c14bcef194aa3ae39e01eb496cf370622c96a07c",
+      "source": "https://static.crates.io/crates/rerun-cli/rerun-cli-0.40.0.crate",
+      "changes": [
+        "Remove the exact = prefix from the mimalloc 0.1.48 dependency in normalized Cargo.toml.",
+        "Omit original registry .cargo_vcs_info.json; Git records fork provenance."
+      ]
     }
   },
   "license_text_source": "Upstream rerun-io/rerun 0.40.0 release checkout, LICENSE-MIT and LICENSE-APACHE."
