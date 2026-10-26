@@ -101,8 +101,7 @@ doc = false
 version = "0.2.12"
 
 [dependencies.mimalloc]
-version = "0.1.48"
-features = ["v3"]
+version = "0.1.52"
 
 [dependencies.re_build_info]
 version = "0.40.0"
