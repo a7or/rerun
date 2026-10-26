@@ -13,7 +13,7 @@ use re_redap_browser::RedapServers;
 use re_redap_client::ConnectionRegistryHandle;
 use re_sdk_types::blueprint::components::{PanelState, PlayState};
 use re_ui::{ContextExt as _, UiExt as _, WindowFrameConfig};
-use re_viewer_context::open_url::{self, ViewerOpenUrl};
+use re_viewer_context::viewer_url::{self, ViewerUrl};
 use re_viewer_context::{
     ActiveStoreContext, AppBlueprintCtx, AppContext, AppOptions, ApplicationSelectionState,
     AuthContext, BlueprintContext, BlueprintUndoState, CommandSender, ComponentUiRegistry,
@@ -28,9 +28,9 @@ use re_viewport_blueprint::ui::add_view_or_container_modal_ui;
 
 use crate::app_blueprint::AppBlueprint;
 use crate::navigation::Navigation;
-use crate::open_url_description::ViewerOpenUrlDescription;
 use crate::ui::settings_screen_ui;
 use crate::ui::{CloudState, LoginState};
+use crate::viewer_url_description::ViewerUrlDescription;
 use crate::{StartupOptions, history};
 
 const WATERMARK: bool = false; // Nice for recording media material
@@ -47,6 +47,10 @@ pub type TestHookAppFn = Box<dyn FnOnce(&re_viewer_context::AppContext<'_>)>;
 pub struct AppState {
     /// Global options for the whole viewer.
     pub(crate) app_options: AppOptions,
+
+    /// The viewer's audio output. The device opens on first use.
+    #[serde(skip)]
+    pub(crate) audio_output: crate::audio_output::AudioOutput,
 
     /// Settings shared by all conversations in the agent panel.
     ///
@@ -167,6 +171,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             app_options: Default::default(),
+            audio_output: Default::default(),
             #[cfg(agent_panel)]
             agent_settings: Default::default(),
             #[cfg(agent_panel)]
@@ -321,6 +326,24 @@ impl AppState {
 
         let egui_ctx = ui.ctx().clone();
 
+        // Record undo points for the blueprint of the shown recording or table.
+        let shown_blueprint_id = if let Some(store_context) = active_store_context {
+            Some(store_context.blueprint.store_id().clone())
+        } else {
+            self.navigation
+                .current()
+                .table_reference()
+                .and_then(|table_ref| table_blueprints.active_id(&table_ref).cloned())
+        };
+        if let Some(blueprint_id) = shown_blueprint_id
+            && let Some(blueprint) = storage_context.bundle.get(&blueprint_id)
+        {
+            self.blueprint_undo_state
+                .entry(blueprint_id)
+                .or_default()
+                .update(&egui_ctx, blueprint);
+        }
+
         let blueprint_query =
             self.blueprint_query_for_viewer(active_store_context.map(|ctx| ctx.blueprint));
 
@@ -365,8 +388,13 @@ impl AppState {
             connection_registry,
             last_loading_error: &self.last_loading_error,
             storage_context,
+            blueprint_undo_states: &self.blueprint_undo_state,
             active_store_context,
             app_caches: &self.app_caches,
+            audio_output: cfg_select! {
+                feature = "audio" => Some(&self.audio_output),
+                _ => None,
+            },
 
             component_ui_registry,
             view_class_registry,
@@ -408,7 +436,7 @@ impl AppState {
             } => {
                 let mut show_settings_ui = true;
                 let app_options = new_app_options.insert(self.app_options.clone());
-                settings_screen_ui(ui, app_options, &mut show_settings_ui);
+                settings_screen_ui(ui, app_options, startup_options, &mut show_settings_ui);
                 if !show_settings_ui {
                     command_sender.send_system(SystemCommand::SetRoute((**previous).clone()));
                 }
@@ -441,7 +469,6 @@ impl AppState {
                 };
 
                 let Self {
-                    blueprint_undo_state,
                     selection_histories,
                     blueprint_time_control,
                     selection_panel,
@@ -452,11 +479,6 @@ impl AppState {
                     view_states,
                     ..
                 } = self;
-
-                blueprint_undo_state
-                    .entry(store_context.blueprint.store_id().clone())
-                    .or_default()
-                    .update(ui.ctx(), store_context.blueprint);
 
                 // If the blueprint is invalid, reset it.
                 if viewport_ui.blueprint.is_invalid() {
@@ -487,13 +509,10 @@ impl AppState {
                     blueprint_query: blueprint_query.clone(),
                 };
                 let time_ctrl = store_context.time_ctrl;
-                let active_timeline = time_ctrl.timeline();
 
                 // Execute the queries for every `View`
                 let query_results = {
                     re_tracing::profile_wait!("query_results");
-
-                    use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 
                     for view in viewport_ui.blueprint.views.values() {
                         view_states.ensure_state_exists(
@@ -503,42 +522,17 @@ impl AppState {
                         );
                     }
 
-                    viewport_ui
-                        .blueprint
-                        .views
-                        .values()
-                        .collect::<Vec<_>>()
-                        .into_par_iter()
-                        .map(|view| {
-                            re_tracing::profile_scope!("view", view.display_name_or_default().to_string().as_str());
-
-                            let view_state = view_states
-                                .get(recording.store_id(), view.id)
-                                .expect("View state should exist, we just called ensure_state_exists on it.");
-
-                            let query_range = view.query_range(
-                                app_blueprint_ctx.current_blueprint(),
-                                app_blueprint_ctx.blueprint_query(),
-                                active_timeline,
-                                view_class_registry,
-                                view_state,
-                            );
-
-                            (
-                                view.id,
-                                view.contents.build_data_result_tree(
-                                    store_context,
-                                    active_timeline,
-                                    view_class_registry,
-                                    app_blueprint_ctx.blueprint_query(),
-                                    &query_range,
-                                    &visualizable_entities_per_visualizer,
-                                    &indicated_entities_per_visualizer,
-                                    app_ctx.app_options,
-                                ),
-                            )
-                        })
-                        .collect::<_>()
+                    re_viewport_blueprint::query_results_for_views(
+                        store_context,
+                        app_ctx.app_caches,
+                        viewport_ui.blueprint.views.values(),
+                        view_class_registry,
+                        app_blueprint_ctx.blueprint_query(),
+                        view_states,
+                        &visualizable_entities_per_visualizer,
+                        &indicated_entities_per_visualizer,
+                        app_ctx.app_options,
+                    )
                 };
 
                 let ctx = ViewerContext {
@@ -572,14 +566,14 @@ impl AppState {
                 if was_open {
                     let blueprint_db = ctx.store_context.blueprint;
 
-                    let undo_state = self
+                    let redo_time = self
                         .blueprint_undo_state
-                        .entry(ctx.store_context.blueprint.store_id().clone())
-                        .or_default();
+                        .get(blueprint_db.store_id())
+                        .and_then(BlueprintUndoState::redo_time);
 
                     {
                         // Copy time from undo-state to the blueprint time control struct:
-                        if let Some(redo_time) = undo_state.redo_time() {
+                        if let Some(redo_time) = redo_time {
                             ctx.command_sender()
                                 .send_system(SystemCommand::TimeControlCommands {
                                     store_id: blueprint_db.store_id().clone(),
@@ -679,6 +673,7 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(viewport_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Viewport");
                         viewport_ui.viewport_ui(ui, &ctx, view_states);
                     });
 
@@ -713,8 +708,8 @@ impl AppState {
                     None,
                 );
 
-                let source_name = if let Ok(url) = ViewerOpenUrl::from_data_source(log_source) {
-                    Cow::Owned(ViewerOpenUrlDescription::from_url(&url).to_string())
+                let source_name = if let Ok(url) = ViewerUrl::from_data_source(log_source) {
+                    Cow::Owned(ViewerUrlDescription::from_url(&url).to_string())
                 } else {
                     // In practice this shouldn't happen.
                     Cow::Borrowed("<unknown>")
@@ -723,11 +718,13 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(viewport_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Loading screen");
+
                         let error = self
                             .last_loading_error_for(log_source)
                             .map(|error| format!("Failed to load {source_name}: {error}"));
                         if ui.loading_screen(
-                            "Loading data source:",
+                            "Loading data source",
                             &*source_name,
                             error.as_deref(),
                             Some("Go Back"),
@@ -753,6 +750,8 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(page_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Table page");
+
                         if let Some(store) = app_ctx.table_stores().get(table_id) {
                             re_dataframe_ui::DataFusionTableWidget::new(
                                 store.session_context(),
@@ -792,6 +791,8 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(page_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Server page");
+
                         if origin == &*re_redap_browser::EXAMPLES_ORIGIN {
                             let origin = self
                                 .redap_servers
@@ -835,7 +836,11 @@ impl AppState {
                     });
             }
 
-            Route::RedapEntry { entry_id, kind, .. } => {
+            Route::RedapEntry {
+                origin,
+                entry_id,
+                kind,
+            } => {
                 Self::left_panel_ui(
                     &mut self.recording_panel,
                     &mut self.blueprint_tree,
@@ -851,9 +856,12 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(page_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Entry page");
+
                         self.redap_servers.entry_ui(
                             &app_ctx,
                             ui,
+                            origin,
                             *entry_id,
                             *kind,
                             table_blueprints,
@@ -881,6 +889,8 @@ impl AppState {
                 egui::CentralPanel::default()
                     .frame(page_frame)
                     .show(ui, |ui| {
+                        ui.name_panel("Folder page");
+
                         self.redap_servers.folder_central_panel_ui(
                             &app_ctx,
                             ui,
@@ -1092,7 +1102,7 @@ impl AppState {
             });
         if let Some(left_panel_response) = left_panel_response {
             left_panel_response.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Panel, true, "blueprint_panel")
+                egui::WidgetInfo::labeled(egui::Role::Pane, true, "Blueprint panel")
             });
         }
 
@@ -1258,7 +1268,7 @@ fn check_for_clicked_hyperlinks(egui_ctx: &egui::Context, command_sender: &Comma
     egui_ctx.output_mut(|o| {
         o.commands.retain_mut(|command| {
             if let egui::OutputCommand::OpenUrl(open_url) = command {
-                if let Ok(url) = open_url::ViewerOpenUrl::parse_with_options(
+                if let Ok(url) = viewer_url::ViewerUrl::parse_with_options(
                     &open_url.url,
                     &re_data_source::FromUriOptions {
                         accept_extensionless_http: false,
@@ -1266,7 +1276,7 @@ fn check_for_clicked_hyperlinks(egui_ctx: &egui::Context, command_sender: &Comma
                 ) {
                     url.open(
                         egui_ctx,
-                        &open_url::OpenUrlOptions {
+                        &viewer_url::OpenUrlOptions {
                             recording_open_behavior: if open_url.new_tab {
                                 RecordingOpenBehavior::Open
                             } else {
@@ -1304,6 +1314,10 @@ impl re_byte_size::MemUsageTreeCapture for AppState {
         tree.add(
             "view_states",
             re_byte_size::MemUsageTreeCapture::capture_mem_usage_tree(&self.view_states),
+        );
+        tree.add(
+            "app_caches",
+            re_byte_size::MemUsageTreeCapture::capture_mem_usage_tree(&self.app_caches),
         );
         tree.into_tree()
     }
@@ -1354,7 +1368,7 @@ mod tests {
         );
         assert_eq!(kind, Some(EntryKind::Table));
 
-        let url = ViewerOpenUrl::from_route(
+        let url = ViewerUrl::from_route(
             &StoreHub::test_hub(),
             &Route::RedapEntry {
                 origin: origin.clone(),
@@ -1366,7 +1380,7 @@ mod tests {
 
         assert_eq!(
             url,
-            ViewerOpenUrl::RedapEntry(re_uri::EntryUri::new(origin, entry_id))
+            ViewerUrl::RedapEntry(re_uri::EntryUri::new(origin, entry_id))
         );
     }
 

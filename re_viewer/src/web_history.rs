@@ -17,7 +17,7 @@ use js_sys::wasm_bindgen;
 use re_log::ResultExt as _;
 use re_log_channel::RecordingOpenBehavior;
 use re_mutex::Mutex;
-use re_viewer_context::{CommandSender, open_url};
+use re_viewer_context::{CommandSender, viewer_url};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast as _, JsError, JsValue};
@@ -168,11 +168,11 @@ fn handle_popstate(
         unreachable!();
     };
 
-    match entry.url.parse::<open_url::ViewerOpenUrl>() {
+    match entry.url.parse::<viewer_url::ViewerUrl>() {
         Ok(url) => {
             url.open(
                 egui_ctx,
-                &open_url::OpenUrlOptions {
+                &viewer_url::OpenUrlOptions {
                     recording_open_behavior: RecordingOpenBehavior::OpenAndSelect,
                     show_loader: true,
                 },
@@ -196,6 +196,30 @@ pub fn go_back() -> Option<()> {
 pub fn go_forward() -> Option<()> {
     let history = re_web::browser::history().ok_or_log_error()?;
     history.forward().ok_or_log_js_error()
+}
+
+/// Whether the browser can currently navigate backward and forward.
+///
+/// The History API does not expose the current position in the history stack.
+/// Feature-detect the Navigation API so unsupported browsers can omit controls whose state they
+/// cannot represent accurately.
+pub fn navigation_availability() -> Option<(bool, bool)> {
+    let window = re_web::browser::window().ok()?;
+    let navigation =
+        js_sys::Reflect::get(window.as_ref(), &JsValue::from_str("navigation")).ok()?;
+
+    if navigation.is_null() || navigation.is_undefined() {
+        return None;
+    }
+
+    let can_go_back = js_sys::Reflect::get(&navigation, &JsValue::from_str("canGoBack"))
+        .ok()?
+        .as_bool()?;
+    let can_go_forward = js_sys::Reflect::get(&navigation, &JsValue::from_str("canGoForward"))
+        .ok()?
+        .as_bool()?;
+
+    Some((can_go_back, can_go_forward))
 }
 
 #[wasm_bindgen]

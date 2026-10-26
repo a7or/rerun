@@ -77,6 +77,8 @@ The key steps are:
 4. Log the derived data using `send_columns()` for efficient columnar logging
 5. Register all derived `.rrd` files to the dataset with a `"tracking_error"` layer name
 
+If the `recording_id` does not match an existing segment, registration creates a new segment instead.
+
 The `"rerun_layer_names"` column of the segment table confirms the new layer was added:
 
 snippet: howto/layers[check_layer_names]
@@ -184,7 +186,7 @@ When you register a recording without specifying a `layer_name`, it is assigned 
 ### Is it possible to obtain a dataframe with a list of all layers in a dataset?
 
 Yes.
-The [`DatasetEntry.segment_table()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry.segment_table) method returns a DataFusion DataFrame with one row per segment and a `rerun_layer_names` column listing the layers of each segment:
+The [`DatasetEntry.segment_table()`](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.DatasetEntry.segment_table) method returns a DataFusion DataFrame with one row per segment and a `rerun_layer_names` column listing the layers of each segment:
 
 snippet: howto/layers[list_layers]
 
@@ -207,3 +209,40 @@ Output:
 │ ILIAD_sbd7d2c6_2023_12_24_16h_20m_37s ┆ [base, tracking_error, quality] │
 └───────────────────────────────────────┴─────────────────────────────────┘
 ```
+
+### How many segments contain each layer?
+
+[`DatasetEntry.info()`](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.DatasetEntry.info) counts the distinct segments of each layer:
+
+```python
+>>> {layer.name: layer.num_segments for layer in dataset.info().layers}
+{'base': 3, 'predictions': 2}
+```
+
+A segment with several layers counts once for each of them, so the counts can add up to more than the number of segments.
+
+### How can I find the segments containing a layer?
+
+Use [`DatasetEntry.layer()`](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.DatasetEntry.layer) to get a handle to an existing named layer across the dataset.
+Its `segment_ids()` method fetches the segments that currently contain that layer:
+
+snippet: howto/layers[inspect_layer]
+
+Looking up an unknown layer raises `ValueError` and lists the available layers.
+An existing handle returns an empty list if the layer is later removed from every segment.
+
+### How can I inspect one segment's layers?
+
+Use [`DatasetEntry.segment()`](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.DatasetEntry.segment) to get a segment handle.
+Its `layers()` method reads the current layer names:
+
+snippet: howto/layers[inspect_segment]
+
+### How can I remove one layer from a segment?
+
+Call `delete_layer()` on the segment handle and wait for completion:
+
+snippet: howto/layers[delete_layer]
+
+Other segments and layers are unchanged.
+Use [`DatasetEntry.unregister()`](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.DatasetEntry.unregister) to unregister multiple segments or layers at once.

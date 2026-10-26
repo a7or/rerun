@@ -12,11 +12,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use re_catalog_client::CatalogClient;
 use re_protos::cloud::v1alpha1::ext::DataSource;
 use re_protos::common::v1alpha1::ext::{IfDuplicateBehavior, SegmentId};
-use re_redap_client::ConnectionHandle;
+use re_types_core::LayerName;
 
 use crate::catalog_handle::CatalogHandle;
+use crate::registrations_in_flight::InFlightRegistration;
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_mins(1);
 
@@ -42,7 +44,7 @@ impl App {
         // Otherwise we end up in a situation where we have a data from an unknown server,
         // which is unnecessary and can get us into a strange ui state.
         if let LogSource::RedapGrpcStream { uri, .. } = rx.source() {
-            if self.connection_registry.is_internal_origin(&uri.origin) {
+            if self.connections.registry.is_internal_origin(&uri.origin) {
                 self.rx_log.add(rx);
                 return;
             }
@@ -234,7 +236,7 @@ impl App {
         let stream = data_source.clone().stream_with_options(
             &self.async_runtime,
             Self::auth_error_handler(self.command_sender.clone()),
-            &self.connection_registry,
+            &self.connections.registry,
             if let LogDataSource::RedapDatasetSegment { open_behavior, .. } = &data_source
                 && matches!(open_behavior, RecordingOpenBehavior::Background)
             {
@@ -251,7 +253,7 @@ impl App {
         if !matches!(
             data_source,
             LogDataSource::RedapDatasetSegment { uri, .. }
-                if self.connection_registry.is_internal_origin(&uri.origin)
+                if self.connections.registry.is_internal_origin(&uri.origin)
         ) {
             record_catalog_load_analytics(data_source.analytics(), None, stream.is_ok());
         }
@@ -292,7 +294,7 @@ impl App {
         match data_source.stream_with_options(
             &self.async_runtime,
             Self::auth_error_handler(self.command_sender.clone()),
-            &self.connection_registry,
+            &self.connections.registry,
             re_redap_client::StreamingOptions {
                 download: re_redap_client::SegmentDownload::BLUEPRINT,
                 ..Default::default()
@@ -372,7 +374,7 @@ impl App {
             match data_source.stream_with_options(
                 &self.async_runtime,
                 Self::auth_error_handler(self.command_sender.clone()),
-                &self.connection_registry,
+                &self.connections.registry,
                 // Downloading the blueprint again would throw away the user's edits.
                 re_redap_client::StreamingOptions {
                     download: re_redap_client::SegmentDownload::SEGMENT,
@@ -414,7 +416,7 @@ impl App {
             .and_then(|ext| ext.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("rrd") || ext.eq_ignore_ascii_case("rbl"))
             && self.app_options().use_viewer_catalog
-            && self.connection_registry.internal_origin().is_some()
+            && self.connections.registry.internal_origin().is_some()
     }
 
     /// Registers a file with the internal catalog, then opens the segment it produced.
@@ -427,13 +429,23 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))] assets: &[std::path::PathBuf],
         #[cfg(target_arch = "wasm32")] file: web_sys::File,
     ) {
-        let connection_registry = self.connection_registry.clone();
+        let connection_registry = self.connections.registry.clone();
         let sender = self.command_sender.clone();
         let path = path.to_owned();
         #[cfg(not(target_arch = "wasm32"))]
         let assets = assets.to_vec();
+        let catalog = CatalogHandle::internal(&connection_registry);
+        // Count it before spawning, so that whatever checks for it right after cannot miss it.
+        let registration_guard = catalog.as_ref().map(|catalog| {
+            self.connections
+                .registrations_in_flight
+                .begin(InFlightRegistration {
+                    origin: catalog.client().origin().clone(),
+                    name: path.display().to_string(),
+                })
+        });
         self.async_runtime.spawn_future(async move {
-            let registration = match CatalogHandle::internal(&connection_registry) {
+            let registration = match catalog {
                 Some(catalog) => {
                     register_file(
                         &catalog,
@@ -457,10 +469,16 @@ impl App {
             match registration {
                 Ok(RegistrationTarget::DatasetSegment(uri)) => {
                     record_catalog_load_analytics(data_source_analytics, Some("internal"), true);
-                    // Refresh the dataset if it is open.
                     sender.send_system(SystemCommand::RefreshRedapEntry {
                         origin: uri.origin.clone(),
                         entry_id: uri.dataset_id.into(),
+                    });
+                    // Registration can add or replace layers in an already-open segment. Its URI
+                    // stays the same, so normal load deduplication would retain the old manifest.
+                    sender.send_system(SystemCommand::ReloadDatasetSegments {
+                        origin: uri.origin.clone(),
+                        dataset_id: uri.dataset_id.into(),
+                        unregistered_asset: None,
                     });
                     sender.send_system(SystemCommand::LoadDataSource(
                         LogDataSource::RedapDatasetSegment {
@@ -492,6 +510,12 @@ impl App {
                     );
                 }
             }
+
+            // Only once the commands above have run, so that the file is never shown as neither
+            // registering nor loading.
+            sender.send_system(SystemCommand::DropAfterQueuedCommands(Box::new(
+                registration_guard,
+            )));
         });
     }
 }
@@ -518,11 +542,9 @@ fn record_catalog_load_analytics(
 
 /// Register an `.rrd` file the user picked with `catalog`.
 ///
-/// The server reads the file itself, so the client only reads what it needs to name the dataset.
-/// The internal catalog reads the original file in place on native, and a copy in its OPFS storage
-/// in the browser. A remote catalog receives the file through a write access grant. Copies and
-/// uploads are keyed by the RRD fingerprint, so re-opening the same file reuses the existing
-/// object.
+/// Staging lets the internal catalog read the original file in place on native, or a copy in
+/// OPFS in the browser. Only the OPFS path reuses an existing copy based on its fingerprint
+/// and size; remote uploads follow the server's existing-key policy.
 async fn register_file(
     catalog: &CatalogHandle,
     path: &Path,
@@ -555,8 +577,26 @@ async fn register_file(
         )
     })?;
 
+    let fingerprint = re_log_encoding::RrdFingerprint::compute_for_rrd(&reader)
+        .await
+        .with_context(|| format!("failed to fingerprint RRD\nFile path: {}", path.display()))?;
+    let filename = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let layer = catalog
+        .is_internal()
+        .then(|| {
+            LayerName::try_new(format!(
+                "{filename}-{}",
+                re_chunk_index::sha256_to_hex(fingerprint.as_bytes())
+            ))
+        })
+        .transpose()?;
+
     let file_url = catalog
-        .write_file(
+        .stage_file(
+            fingerprint,
             #[cfg(not(target_arch = "wasm32"))]
             abs_path,
             #[cfg(target_arch = "wasm32")]
@@ -564,7 +604,7 @@ async fn register_file(
         )
         .await?;
 
-    register_rrd_file_url(catalog.connection(), file_url, rrd_metadata).await
+    register_rrd_file_url(catalog.client(), file_url, rrd_metadata, layer).await
 }
 
 /// Makes use of the fact that we don't need to scan for `default_blueprint_by_app_id`,
@@ -594,11 +634,12 @@ pub enum RegistrationTarget {
     Entry(EntryId),
 }
 
-/// Register a URL the server can read with the catalog behind `connection`.
+/// Register a URL the server can read with the catalog behind `catalog_client`.
 async fn register_rrd_file_url(
-    connection: &ConnectionHandle,
+    catalog_client: &CatalogClient,
     file_url: url::Url,
     rrd_metadata: re_log_encoding::RrdMetadata,
+    layer: Option<LayerName>,
 ) -> anyhow::Result<RegistrationTarget> {
     let application_id = rrd_metadata
         .store_ids
@@ -616,19 +657,20 @@ async fn register_rrd_file_url(
         );
     }
 
-    let origin = connection.origin().clone();
-    let data_source = DataSource::new_rrd_url(file_url);
+    let origin = catalog_client.origin().clone();
+    // The hidden blueprint dataset keeps its base layer; only recordings get per-file layers.
+    let blueprint_data_source = DataSource::new_rrd_url(file_url.clone(), None);
+    let mut data_source = DataSource::new_rrd_url(file_url, None);
+    if let Some(layer) = layer {
+        data_source.layer = layer;
+    }
     let dataset_name = re_log_types::EntryName::from(application_id.clone());
 
     // If there are recordings in the file, register them with the dataset.
     // Otherwise, create the dataset so it can hold the blueprints.
-    let dataset_id = connection
-        .client()
-        .await?
-        .find_or_create_dataset(&dataset_name)
-        .await?;
+    let dataset_id = catalog_client.find_or_create_dataset(&dataset_name).await?;
     let segment_id = if rrd_metadata.store_ids.iter().any(StoreId::is_recording) {
-        connection
+        catalog_client
             .register_with_dataset(
                 dataset_id,
                 vec![data_source.clone()],
@@ -646,9 +688,9 @@ async fn register_rrd_file_url(
     };
 
     if let Err(err) = register_blueprints(
-        connection,
+        catalog_client,
         dataset_id,
-        data_source,
+        blueprint_data_source,
         &rrd_metadata,
         application_id,
     )
@@ -676,7 +718,7 @@ async fn register_rrd_file_url(
 /// The blueprint stores live in the same RRD, so the server can select and serve them lazily from
 /// the same data source.
 async fn register_blueprints(
-    connection: &ConnectionHandle,
+    catalog_client: &CatalogClient,
     dataset_id: EntryId,
     data_source: DataSource,
     rrd_metadata: &RrdMetadata,
@@ -686,14 +728,14 @@ async fn register_blueprints(
         return Ok(());
     }
 
-    let mut client = connection.client().await?;
+    let mut client = catalog_client.client().await?;
     let mut dataset_details = client.read_dataset_entry(dataset_id).await?.dataset_details;
     let Some(blueprint_dataset_id) = dataset_details.blueprint_dataset else {
         re_log::warn!("Dataset {dataset_id} has no hidden blueprint dataset");
         return Ok(());
     };
 
-    let registration = connection
+    let registration = catalog_client
         .register_with_dataset(
             blueprint_dataset_id,
             vec![data_source],

@@ -475,6 +475,57 @@ fn start_streaming_segment_table_blueprint(
     });
 }
 
+/// Re-read an entry from the server and stream its current default table blueprint.
+///
+/// The default can change after the entries were fetched, for instance by `register_blueprint`.
+pub fn refresh_default_table_blueprint(
+    connection: ConnectionHandle,
+    entry: &Entry,
+    runtime: &AsyncRuntimeHandle,
+    command_sender: &CommandSender,
+) {
+    let entry_id = entry.id();
+    let is_dataset = match entry.inner() {
+        Ok(EntryInner::Dataset(_)) => true,
+        Ok(EntryInner::Table(_)) => false,
+        Err(_) => return,
+    };
+    let runtime = runtime.clone();
+    let command_sender = command_sender.clone();
+
+    runtime.clone().spawn_future(async move {
+        let origin = connection.origin().clone();
+        let result: EntryResult = async {
+            let mut client = connection.client().await?;
+            if is_dataset {
+                let dataset_entry = client.read_dataset_entry(entry_id).await?;
+                start_streaming_segment_table_blueprint(
+                    client,
+                    &dataset_entry,
+                    &origin,
+                    &runtime,
+                    &command_sender,
+                );
+            } else {
+                let table_entry = client.read_table_entry(entry_id).await?;
+                start_registered_table_blueprint_stream(
+                    client,
+                    &table_entry,
+                    &origin,
+                    &runtime,
+                    &command_sender,
+                );
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            re_log::warn!("Failed to refresh the default table blueprint: {err}");
+        }
+    });
+}
+
 fn start_registered_table_blueprint_stream(
     client: ConnectionClient,
     table_entry: &TableEntry,
@@ -544,8 +595,8 @@ async fn fetch_table_details(
     );
 
     let tokio_runtime = cfg_select! {
-        target_arch = "wasm32" => { None }
-        _ => { Some(runtime.inner().clone()) }
+        target_arch = "wasm32" => None,
+        _ => Some(runtime.inner().clone()),
     };
 
     let table_kind = TableKind::from(&result.table_entry.provider_details);
@@ -573,6 +624,16 @@ async fn fetch_table_details(
 }
 
 #[cfg(test)]
+impl Entries {
+    /// A listing that has arrived and holds nothing.
+    pub fn settled_empty() -> Self {
+        Self {
+            entries: RequestedObject::Completed(HashMap::default()),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -585,9 +646,7 @@ mod tests {
         let in_flight = Entries::default();
         assert!(in_flight.is_kind_pending(entry_id));
 
-        let arrived = Entries {
-            entries: RequestedObject::Completed(HashMap::default()),
-        };
+        let arrived = Entries::settled_empty();
         assert!(!arrived.is_kind_pending(entry_id));
     }
 }

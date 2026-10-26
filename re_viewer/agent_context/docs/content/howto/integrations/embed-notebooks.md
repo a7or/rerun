@@ -1,7 +1,7 @@
 ---
 title: Embed Rerun in notebooks
 order: 0
-description: How to embed Rerun in notebooks like Jupyter or Colab
+description: How to embed Rerun in notebooks like Jupyter, Colab, or marimo
 ---
 
 Starting with version 0.15.1, Rerun has improved support for embedding the Rerun Viewer directly within IPython-style
@@ -13,6 +13,7 @@ Rerun has been tested with:
 -   [Jupyter Lab](https://jupyter.org/)
 -   [VSCode](https://code.visualstudio.com/blogs/2021/08/05/notebooks)
 -   [Google Colab](https://colab.research.google.com/)
+-   [marimo](https://marimo.io/)
 
 To begin, install the `rerun-sdk` package with the `notebook` extra:
 ```sh
@@ -58,7 +59,7 @@ rr.notebook_show()
   <source media="(max-width: 1200px)" srcset="https://static.rerun.io/notebook_example/e47920b7ca7988aba305d73b2aea2da7b81c93e3/1200w.png">
 </picture>
 
-This is similar to calling `rr.connect_grpc()` or `rr.serve()` in that it configures the Rerun SDK to send data to a viewer instance.
+This is similar to calling `rr.connect_grpc()` or `rr.serve_grpc()` in that it configures the Rerun SDK to send data to a viewer instance.
 
 Note that the call to `rr.notebook_show()` drains the recording of its data. This means that any subsequent calls to `rr.notebook_show()`
 will not result in the same data being displayed, because it has already been removed from the recording.
@@ -100,10 +101,10 @@ viewer.on_event(on_event)
 display(viewer)
 ```
 
-Whenever an entity is selected in the Viewer, `selected_entities.value` changes. The payload includes other useful information,
+Whenever an entity is selected in the Viewer, `selected_entities` is updated. The payload includes other useful information,
 such as the position of the selection within a 2D or 3D view.
 
-For a more complete example, see [callbacks.ipynb](https://github.com/rerun-io/rerun/blob/main/examples/python/notebook_callbacks/notebook_callbacks.ipynb).
+For a more complete example, see [callbacks.ipynb](https://github.com/rerun-io/rerun/blob/main/examples/notebook/notebook_callbacks/notebook_callbacks.ipynb).
 
 ## Working with blueprints
 
@@ -181,12 +182,12 @@ To experiment with notebooks yourself, there are a few options.
 
 ### Running locally
 
-The GitHub repo includes a [notebook example](https://github.com/rerun-io/rerun/blob/main/examples/python/notebook/cube.ipynb).
+The GitHub repo includes a [notebook example](https://github.com/rerun-io/rerun/blob/main/examples/notebook/notebook/cube.ipynb).
 
 If you have a local checkout of Rerun, you can:
 
 ```bash
-$ cd examples/python/notebook
+$ cd examples/notebook/notebook
 $ pip install -r requirements.txt
 $ jupyter notebook cube.ipynb
 ```
@@ -195,10 +196,24 @@ This will open a browser window showing the notebook where you can follow along.
 
 ### Running in Google Colab
 
-We also host a copy of the notebook in [Google Colab](https://colab.research.google.com/drive/1R9I7s4o6wydQC_zkybqaSRFTtlEaked_)
+You can [open a copy of this notebook in Google Colab](https://colab.research.google.com/github/rerun-io/rerun/blob/latest/examples/notebook/notebook/cube_colab.ipynb).
 
-Note that if you copy and run the notebook yourself, the first Cell installs Rerun into the Colab environment.
-After running this cell you will need to restart the Runtime for the Rerun package to show up successfully.
+The first cell installs the latest Rerun release into the Colab environment and then restarts the runtime.
+Run the cells again after the restart.
+
+### Running in marimo
+
+The same example is available as a [marimo notebook](https://github.com/rerun-io/rerun/blob/main/examples/notebook/notebook/cube_marimo.py):
+
+```bash
+$ cd examples/notebook/notebook
+$ pip install "rerun-sdk[notebook]" marimo
+$ marimo edit cube_marimo.py
+```
+
+marimo handles messages from the viewer only between cells, so a viewer cannot receive data until the cell that created it has finished.
+To stream data live, create the viewer in one cell and log to it from a later one.
+`block_until_ready` has no effect in marimo.
 
 ## Limitations
 
@@ -209,4 +224,3 @@ If you encounter the issue, you can try to use the `save()` API to save the data
 ## Future work
 
 We are actively working on improving the notebook experience and welcome any [feedback or suggestions](https://rerun.io/feedback).
-The ongoing roadmap is being tracked in [GitHub issue #1815](https://github.com/rerun-io/rerun/issues/1815).

@@ -56,6 +56,7 @@ Tables support the following mutation operations through the Catalog SDK:
 - _upsert_: replace existing rows (based on an index column) with new data
 
 Thanks to [DataFusion](https://datafusion.apache.org/), tables also support most database operations such as querying, filtering, joining, etc.
+See [Storing query results in catalog tables](../../howto/query-and-transform/catalog-tables.md) for a complete example using these operations.
 
 ## Datasets
 
@@ -64,10 +65,13 @@ These episodes within datasets are called _segments_, which are identified by a 
 
 Segments are added to datasets by the process of _registering_ a [recording](../logging-and-ingestion/recordings.md) (typically stored in some object store such as S3) to the dataset using the Catalog SDK.
 The recording ID of the `.rrd` file is used as its segment ID.
+Keep one recording per registered `.rrd` file.
+Rerun Hub registers each file as a single segment, named after the first recording in it.
 
 Recordings registered to a given segment are organized by layers, identified by a layer name.
 By default, the `"base"` layer name is used.
-Registering two `.rrd` files with the same recording ID (that is, with the same segment ID) to the same dataset, and using the same layer name, will result in the second `.rrd` overwriting the first.
+Registering two `.rrd` files with the same recording ID (that is, with the same segment ID) to the same dataset, and using the same layer name, throws an error by default.
+Pass `on_duplicate=OnDuplicateSegmentLayer.REPLACE` to `register()` to overwrite the existing layer, or `SKIP` to leave it in place.
 Additive registration can be achieved by using different layer names for different `.rrd`s with the same recording ID/segment ID.
 
 <div class="d2-diagram">
@@ -78,8 +82,28 @@ Additive registration can be achieved by using different layer names for differe
 Layers are immutable and can only be overwritten by registering a new `.rrd` file. In other words, datasets support the following mutation operations:
 - _create segment_: by registering a `.rrd` with a "new" recording ID
 - _append to segment_: by registering a `.rrd` with a matching recording ID to a new layer name
-- _overwrite segment layer_: by registering a `.rrd` with a matching recording ID to an existing layer name
+- _overwrite segment layer_: by registering a `.rrd` with a matching recording ID to an existing layer name, with `on_duplicate=OnDuplicateSegmentLayer.REPLACE`
 
+### Managing segment layers with the Python catalog API
+
+Use `DatasetEntry.segment()` to get a handle to a segment, inspect its current layers, or get its Viewer URL.
+Call `delete_layer()` to unregister one layer from that segment, then wait for the returned handle to track completion.
+Unregistering removes catalog references but does not delete the underlying source objects.
+
+```python
+segment = dataset.segment(segment_id)
+print(segment.layers())
+print(segment.url)
+
+unregistration = segment.delete_layer("predictions")
+unregistration.wait()
+```
+
+To inspect a named layer across the dataset, use `dataset.layer(name).segment_ids()`.
+The layer handle reads current membership on each call, including registrations and removals made after the handle was created.
+See [finding segments in a layer](../../howto/logging-and-ingestion/layers.md#how-can-i-find-the-segments-containing-a-layer) for an example.
+
+See the [`Segment` API reference](https://ref.rerun.io/docs/python/stable/catalog/#rerun.catalog.Segment) for details.
 
 ### Schema
 
@@ -90,6 +114,16 @@ We refer to this as _schema-on-read_, because the schema proceeds from the data,
 This differs from the table model, where the schema is defined upfront (_schema-on-write_).
 
 In this context, the schema of a dataset is the union of schemas of its segments, which themselves are the union of the schemas of their layers.
+
+Use `segment.schema()` to fetch a snapshot of one segment's schema across its registered layers.
+Referenced assets are excluded from the segment's schema.
+
+```python
+segment_schema = dataset.segment(segment_id).schema()
+print(segment_schema)
+print(dataset.schema())
+print(dataset.schema().to_arrow())
+```
 
 <div class="d2-diagram">
   <img class="d2-dark" src="https://static.rerun.io/f98523a3b94a18887af13ad8b45a05f685480a2d_d2.svg" alt="">
@@ -108,6 +142,9 @@ A dataset can be assigned a blueprint.
 This is done by registering a `.rbl` blueprint file typically stored in object storage to the dataset.
 A dedicated API exists for this in the Catalog SDK: [`DatasetEntry.register_blueprint()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry.register_blueprint).
 In that case, the blueprint is applied to all segments of the dataset when visualized in the Rerun Viewer.
+
+A separate **table blueprint** can be used to configure the segment table itself: columns, card layouts, and embedded segment previews.
+See [Configure table layouts and segment previews](../../howto/visualization/configure-table-blueprints.md) for the complete save-and-register workflow.
 
 
 ### Assets
@@ -169,4 +206,3 @@ print(asset_dataset.schema())
 # Assets only hold static data, so there is no index to read along.
 df = asset_dataset.reader(index=None)
 ```
-

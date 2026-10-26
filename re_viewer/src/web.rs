@@ -11,10 +11,12 @@ use itertools::Itertools as _;
 use re_async::AsyncRuntimeHandle;
 use re_log::ResultExt as _;
 use re_log_channel::{LogSender, RecordingOpenBehavior};
-use re_log_types::{TableId, TableMsg, TimelineName};
+use re_log_msg::TableMsg;
+use re_log_types::TableId;
+use re_log_types::TimelineName;
 use re_memory::AccountingAllocator;
 use re_sdk_types::blueprint::components::PlayState;
-use re_viewer_context::{SystemCommand, SystemCommandSender as _, TimeControlCommand, open_url};
+use re_viewer_context::{SystemCommand, SystemCommandSender as _, TimeControlCommand, viewer_url};
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
@@ -61,6 +63,9 @@ impl WebHandle {
         } else {
             re_redap_client::ConnectionRegistry::new_with_stored_credentials()
         };
+        let catalog = crate::internal_catalog::build();
+        let connection_registry = connection_registry
+            .with_internal(catalog.connection.clone(), catalog.storage_dir().to_owned());
 
         Ok(Self {
             runner: eframe::WebRunner::new(),
@@ -277,11 +282,11 @@ impl WebHandle {
             return;
         };
 
-        match url.parse::<open_url::ViewerOpenUrl>() {
+        match url.parse::<viewer_url::ViewerUrl>() {
             Ok(url) => {
                 url.open(
                     &app.egui_ctx,
-                    &open_url::OpenUrlOptions {
+                    &viewer_url::OpenUrlOptions {
                         recording_open_behavior: RecordingOpenBehavior::OpenAndSelect,
                         show_loader: true,
                     },
@@ -736,7 +741,9 @@ pub struct AppOptions {
     manifest_url: Option<String>,
     render_backend: Option<String>,
     video_decoder: Option<String>,
+    memory_limit: Option<String>,
     hide_welcome_screen: Option<bool>,
+    check_for_updates_on_startup: Option<bool>,
     // allow_fullscreen: Option<bool>, // Not serialized from js as it governs how the `fullscreen` option is used.
     enable_history: Option<bool>,
     // width: Option<String>, // Width & height aren't serialized and only used to configure the canvas.
@@ -809,7 +816,9 @@ fn create_app(
         manifest_url,
         render_backend,
         video_decoder,
+        memory_limit,
         hide_welcome_screen,
+        check_for_updates_on_startup,
         panel_state_overrides,
         on_viewer_event,
         fullscreen,
@@ -845,6 +854,7 @@ fn create_app(
         location: Some(cc.integration_info.web_info.location.clone()),
         // Don't persist state in integration-test mode.
         persist_state: !integration_test,
+        check_for_updates_on_startup,
         is_in_notebook: notebook.unwrap_or(false),
         expect_data_soon: None,
         force_wgpu_backend: render_backend.clone(),
@@ -899,6 +909,27 @@ fn create_app(
         }
     }
 
+    // An explicit web option takes precedence over the restored memory limit.
+    if let Some(memory_limit) = memory_limit {
+        match re_memory::MemoryLimit::parse(&memory_limit) {
+            Ok(limit) => {
+                let default_limit = re_memory::MemoryLimit::default_for_current_platform();
+                app.app_options_mut().memory_limit = if default_limit.as_bytes() < limit.as_bytes()
+                {
+                    re_log::warn!(
+                        "Memory limit of {limit} is above the web viewer's maximum of {default_limit}. Using {default_limit} instead."
+                    );
+                    default_limit
+                } else {
+                    limit
+                };
+            }
+            Err(err) => {
+                re_log::warn!("Ignoring bad `memory_limit` value {memory_limit:?}: {err}");
+            }
+        }
+    }
+
     if enable_history {
         install_popstate_listener(&mut app).ok_or_log_error();
     }
@@ -909,11 +940,11 @@ fn create_app(
 
     if let Some(urls) = url {
         for url in urls.into_inner() {
-            match url.parse::<open_url::ViewerOpenUrl>() {
+            match url.parse::<viewer_url::ViewerUrl>() {
                 Ok(url) => {
                     url.open(
                         &app.egui_ctx,
-                        &open_url::OpenUrlOptions {
+                        &viewer_url::OpenUrlOptions {
                             recording_open_behavior: RecordingOpenBehavior::OpenAndSelect,
                             show_loader: true,
                         },

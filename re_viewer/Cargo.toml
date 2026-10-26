@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.96"
 name = "re_viewer"
-version = "0.38.1"
+version = "0.40.0"
 authors = ["rerun.io <opensource@rerun.io>"]
 build = "build.rs"
 include = [
@@ -21,9 +21,22 @@ include = [
     "../../LICENSE-APACHE",
     "../../LICENSE-MIT",
     "**/*.rs",
-    "agent_context/**",
+    "agent_context/**/*.cpp",
+    "agent_context/**/*.in",
+    "agent_context/**/*.md",
+    "agent_context/**/*.py",
+    "agent_context/**/*.rs",
+    "agent_context/**/*.toml",
+    "agent_context/**/*.txt",
+    "agent_context/**/*.yaml",
     "Cargo.toml",
-    "data/*",
+    "data/**/*.cpp",
+    "data/**/*.jpg",
+    "data/**/*.md",
+    "data/**/*.png",
+    "data/**/*.py",
+    "data/**/*.rs",
+    "data/**/*.svg",
 ]
 publish = true
 autolib = false
@@ -53,11 +66,20 @@ ignored-paths = ["data/quick_start_guides/*.rs"]
 agent_context = []
 analytics = [
     "dep:re_analytics",
+    "re_dataframe_ui/analytics",
     "re_ui/analytics",
+]
+audio = [
+    "re_audio/output",
+    "dep:re_view_audio",
 ]
 default = [
     "agent_context",
     "analytics",
+    "default_web",
+]
+default_web = [
+    "audio",
     "map_view",
 ]
 map_view = ["dep:re_view_map"]
@@ -88,20 +110,8 @@ name = "viewer"
 path = "src/bin/viewer/main.rs"
 
 [[test]]
-name = "all_component_fallbacks"
-path = "tests/all_component_fallbacks.rs"
-
-[[test]]
-name = "app_kittest"
-path = "tests/app_kittest.rs"
-
-[[test]]
-name = "blueprint_test"
-path = "tests/blueprint_test.rs"
-
-[[test]]
-name = "time_control_blueprint_test"
-path = "tests/time_control_blueprint_test.rs"
+name = "integration"
+path = "tests/integration/main.rs"
 
 [dependencies.ahash]
 version = "0.8.12"
@@ -133,50 +143,52 @@ version = "1.2"
 version = "0.8.4"
 
 [dependencies.eframe]
-version = "0.36.2"
+version = "0.37.0"
 features = [
     "accesskit",
-    "default_fonts",
+    "clipboard",
     "inspection",
     "links",
+    "system_fonts",
     "wayland",
     "x11",
-    "default_fonts",
     "persistence",
+    "system_fonts",
     "wgpu",
 ]
 default-features = false
 
 [dependencies.egui]
-version = "0.36.2"
+version = "0.37.0"
 features = [
     "callstack",
     "color-hex",
     "rayon",
 ]
+default-features = false
 
 [dependencies.egui-wgpu]
-version = "0.36.2"
+version = "0.37.0"
 
 [dependencies.egui_inspection]
-version = "0.36.2"
+version = "0.37.0"
 features = ["plugin"]
 default-features = false
 
 [dependencies.egui_plot]
-version = "0.37.0"
+version = "0.38.0"
 
 [dependencies.ehttp]
 version = "0.7.1"
 
 [dependencies.emath]
-version = "0.36.2"
+version = "0.37.0"
 
 [dependencies.futures]
-version = "0.3.33"
+version = "0.3.34"
 
 [dependencies.glam]
-version = "0.30.10"
+version = "0.33.11"
 features = [
     "debug-glam-assert",
     "serde",
@@ -205,102 +217,124 @@ version = "0.2.19"
 version = "0.12.5"
 features = ["serde"]
 
-[dependencies.rayon]
-version = "1.12"
+[dependencies.rand]
+version = "0.9.5"
+features = [
+    "small_rng",
+    "std",
+    "thread_rng",
+]
+default-features = false
 
 [dependencies.re_analytics]
-version = "0.38.1"
+version = "0.40.0"
 optional = true
 default-features = false
 
+[dependencies.re_arrow_json]
+version = "0.40.0"
+default-features = false
+
 [dependencies.re_async]
-version = "0.38.1"
+version = "0.40.0"
+default-features = false
+
+[dependencies.re_audio]
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_auth]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_blueprint_tree]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_build_info]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_byte_size]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_capabilities]
-version = "0.38.1"
+version = "0.40.0"
+default-features = false
+
+[dependencies.re_catalog_client]
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_chunk]
-version = "0.38.1"
+version = "0.40.0"
+default-features = false
+
+[dependencies.re_chunk_index]
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_chunk_store]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_chunk_store_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_component_fallbacks]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_component_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_data_source]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_data_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_dataframe_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_entity_db]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_error]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_format]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_gamepad]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_importer]
-version = "0.38.1"
+version = "0.40.0"
 features = ["all"]
 default-features = false
 
 [dependencies.re_log]
-version = "0.38.1"
+version = "0.40.0"
 features = ["setup"]
 default-features = false
 
 [dependencies.re_log_channel]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_log_encoding]
-version = "0.38.1"
+version = "0.40.0"
 features = [
     "decoder",
     "encoder",
@@ -308,146 +342,155 @@ features = [
 ]
 default-features = false
 
+[dependencies.re_log_msg]
+version = "0.40.0"
+default-features = false
+
 [dependencies.re_log_types]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_memory]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_memory_view]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_mutex]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_protos]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_query]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_recording_panel]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_redap_browser]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_redap_client]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_renderer]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_sdk_types]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_selection_panel]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_server]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_sorbet]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_string_interner]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_time_panel]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_tracing]
-version = "0.38.1"
+version = "0.40.0"
 features = ["server"]
 default-features = false
 
 [dependencies.re_types_core]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_uri]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_video]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view]
-version = "0.38.1"
+version = "0.40.0"
+default-features = false
+
+[dependencies.re_view_audio]
+version = "0.40.0"
+optional = true
 default-features = false
 
 [dependencies.re_view_bar_chart]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_dataframe]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_graph]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_map]
-version = "0.38.1"
+version = "0.40.0"
 optional = true
 default-features = false
 
 [dependencies.re_view_spatial]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_state_timeline]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_tensor]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_text_document]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_text_log]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_view_time_series]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_viewer_context]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_viewport]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_viewport_blueprint]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.rfd]
@@ -526,11 +569,11 @@ default-features = false
 version = "1.48"
 
 [dev-dependencies.re_test_context]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dev-dependencies.re_test_viewport]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dev-dependencies.tokio]
@@ -541,28 +584,40 @@ default-features = false
 version = "0.2.2"
 
 [build-dependencies.re_build_tools]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.axum]
+version = "0.8.9"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.egui_kittest]
-version = "0.36.2"
+version = "0.37.0"
 features = [
-    "wgpu",
-    "snapshot",
     "eframe",
+    "snapshot",
+    "wgpu",
 ]
+default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.poll-promise]
 version = "0.3.0"
 features = ["tokio"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.re_agent_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.re_perf_telemetry]
-version = "0.38.1"
+version = "0.40.0"
 optional = true
+default-features = false
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.rustls]
+version = "0.23.45"
+features = [
+    "ring",
+    "std",
+]
 default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.tempfile]
@@ -572,6 +627,9 @@ version = "3.27"
 version = "1.53"
 default-features = false
 
+[target."cfg(rerun_workspace_hack)".dependencies.re_workspace_hack]
+version = "0.0.0"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.js-sys]
 version = "0.3.103"
 
@@ -580,7 +638,7 @@ version = "0.3.0"
 features = ["web"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.re_web]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen]
@@ -601,6 +659,31 @@ features = [
     "UrlSearchParams",
     "Window",
 ]
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2]
+version = "0.6.4"
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-app-kit]
+version = "0.3.2"
+features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+]
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
+version = "0.3.2"
+features = [
+    "std",
+    "NSArray",
+    "NSObject",
+    "NSString",
+]
+default-features = false
 
 [lints.clippy]
 allow_attributes = "warn"
@@ -752,7 +835,10 @@ priority = -1
 [lints.rust.unexpected_cfgs]
 level = "deny"
 priority = 0
-check-cfg = ["cfg(TODO)"]
+check-cfg = [
+    "cfg(TODO)",
+    "cfg(rerun_workspace_hack)",
+]
 
 [lints.rustdoc]
 all = "warn"

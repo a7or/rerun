@@ -15,10 +15,11 @@ Dataframe queries are designed to bridge this gap. They allow you to query arbit
 
 ## Where can dataframe queries be used?
 
-Dataframe queries can be used in two contexts:
+Dataframe queries can be used in three contexts:
 
 - **Interactively in the Viewer**: The [dataframe view](../../reference/types/views/dataframe_view.md) displays query results as a table, useful for inspecting raw values and debugging.
 - **Programmatically using the Catalog SDK**: The [`DatasetEntry`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry) object provides API to filter and query datasets and turn them into dataframes.
+- **On a single recording, without a server**: [`ChunkStore.reader()`](../logging-and-ingestion/chunk-processing-api.md) runs the same query over a recording loaded from an `.rrd` file.
 
 
 ## Understanding dataframe queries
@@ -85,12 +86,26 @@ A row is produced for each distinct index (or timeline) value for which there is
 For example, if you filter for entities `/camera` and `/lidar`, and `/camera` has data at timestamps [1, 2, 3] while `/lidar` has data at [2, 4], the output will have rows for timestamps [1, 2, 3, 4]. Columns without data at a given timestamp will contain null values (unless sparse fill is enabled).
 
 
+### Why are component columns lists?
+
+Component columns always have a list datatype, even when a single value was logged per row, because each row contains a [component batch](../logging-and-ingestion/batches.md#storage).
+For example, `rr.Scalars(0.96)` appears as `[0.96]`, while `rr.Points3D` positions contain one entry per point.
+An empty list means the entity was [cleared](../../reference/types/archetypes/clear.md).
+
+To extract a single value, index into the list:
+
+```python
+# DataFusion indices start at 0 (SQL's `array_element()` starts at 1)
+df.filter(col("/data:Scalars:scalars")[0] > 0.95)
+```
+
+
 ### What is the difference between dataset's `filter_contents()` and DataFusion's `select()`?
 
 At first glance, both methods control which columns appear in the result. However, they differ in an important way:
 
 - **`filter_contents()`** restricts which entities are considered for row generation. This affects both which columns *and* which rows are returned.
-- **`select()`** is a DataFusion operation that only filters columns *after* rows have been determined. It does not affect row generation.
+- **`select()`** is a DataFusion operation that filters columns. With `fill_latest_at=True` it does not affect row generation. Without it, rows at other entities' timestamps would be entirely null, so they are not produced.
 
 Building on the previous example, if `/camera` has data at timestamps [1, 2, 3] and `/lidar` has data at [2, 4]:
 
@@ -99,8 +114,8 @@ Building on the previous example, if `/camera` has data at timestamps [1, 2, 3] 
 dataset.filter_contents("/camera").reader(index="timestamp")
 
 # Rows at [1, 2, 3, 4] with only /camera columns
-# (null values at timestamp 4 where /camera has no data)
-dataset.filter_contents(["/camera", "/lidar"]).reader(index="timestamp").select("/camera")
+# (the value at timestamp 4 is filled from timestamp 3)
+dataset.filter_contents(["/camera", "/lidar"]).reader(index="timestamp", fill_latest_at=True).select("/camera")
 ```
 
 ### How are segments handled by dataframe queries?
@@ -109,7 +124,7 @@ When querying a dataset with multiple [segments](catalog-object-model.md#dataset
 
 - Latest-at semantics do not cross segment boundaries. Each segment is queried independently.
 - The output includes a `rerun_segment_id` column identifying which segment each row comes from.
-- Use `filter_segments()` on a dataset or dataset view to restrict the query to specific segment IDs.
+- Use `filter_segments()` on a dataset or dataset selection to restrict the query to specific segment IDs.
 
 ### How is static data queried?
 
@@ -128,7 +143,7 @@ This is achieved by setting the index to `None`:
 df = dataset.reader(index=None)
 ```
 
-The returned dataframe contains a single row with all the static data from the filtered content.
+The returned dataframe contains one row per segment holding all the static data from the filtered content.
 
 
 ### How do dataframe queries achieve resampling?
@@ -148,6 +163,10 @@ df = dataset.reader(
 - `using_index_values` specifies the exact timestamps to sample
 - `fill_latest_at=True` fills null values with the most recent data (latest-at/forward fill semantics)
 
+There is no staleness limit: a value fills every later row until the next value is logged.
+Time filters restrict which rows are returned, not which values fill them, so a row in a filtered range can be filled from before that range.
+The fill applies to all columns at once.
+
 For a complete example, see the [Time-align data](../../howto/query-and-transform/time_alignment.md) how-to.
 
 
@@ -155,8 +174,8 @@ For a complete example, see the [Time-align data](../../howto/query-and-transfor
 
 - [🐍 Python Catalog SDK reference](https://ref.rerun.io/docs/python/stable/common/catalog/)
   - [`DatasetEntry`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry)
-  - [`DatasetView`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetView)
-  - [`reader()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetView.reader)
+  - [`DatasetSelection`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetSelection)
+  - [`reader()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetSelection.reader)
   - [`filter_contents()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry.filter_contents)
   - [`filter_segments()`](https://ref.rerun.io/docs/python/stable/common/catalog/#rerun.catalog.DatasetEntry.filter_segments)
 - [Dataframe view](../../reference/types/views/dataframe_view.md) for visualizing query results in the Viewer

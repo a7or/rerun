@@ -25,6 +25,15 @@ impl App {
         mem_usage_tree: Option<NamedMemUsageTree>,
         store_stats: Option<&StoreHubStats>,
     ) {
+        // Before the panels: the highlight is dismissed by any click, and the welcome screen
+        // clears `InputState::pointer` while it paints, so a read afterwards would miss that
+        // click. The outline is painted on its own layer, so it still ends up on top.
+        if let Some(highlight) = &self.screen_highlight
+            && !highlight.show(ui)
+        {
+            self.screen_highlight = None;
+        }
+
         let custom_window_decorations = self.custom_window_decorations();
 
         let mut main_panel_frame = egui::Frame::default();
@@ -87,10 +96,10 @@ impl App {
                     let is_start_of_new_frame = ui.current_pass_index() == 0;
 
                     if is_start_of_new_frame {
-                        if let Some(origin) = self.connection_registry.internal_origin() {
+                        if let Some(origin) = self.connections.registry.internal_origin() {
                             self.state.redap_servers.add_internal_server(
                                 origin.clone(),
-                                &self.connection_registry,
+                                &self.connections.registry,
                                 &self.async_runtime,
                                 &self.egui_ctx,
                             );
@@ -100,7 +109,7 @@ impl App {
                         }
 
                         self.state.redap_servers.on_frame_start(
-                            &self.connection_registry,
+                            &self.connections.registry,
                             &self.async_runtime,
                             &self.egui_ctx,
                             self.startup_options.login_enabled(),
@@ -147,11 +156,12 @@ impl App {
                         &self.rx_log,
                         &self.command_sender,
                         &WelcomeScreenState {
-                            hide_examples: self.startup_options.hide_welcome_screen,
+                            hide_examples: self.startup_options.hide_welcome_screen
+                                || !self.app_options().enable_welcome_screen,
                             opacity: self.welcome_screen_opacity(ui),
                         },
                         self.event_dispatcher.as_ref(),
-                        &self.connection_registry,
+                        &self.connections.registry,
                         &self.async_runtime,
                         self.custom_window_frame(),
                     );
@@ -227,13 +237,17 @@ impl App {
         }
 
         let viewer_endpoint = self
-            .connection_registry
+            .connections
+            .registry
             .internal_origin()
             .map(|origin| origin.as_url());
         let cache_dir = self.app_options().cache_directory.clone();
 
         let Self {
-            agent_panel, state, ..
+            agent_panel,
+            state,
+            build_info,
+            ..
         } = self;
 
         agent_panel.show(
@@ -242,6 +256,7 @@ impl App {
             &mut state.agent_settings,
             viewer_endpoint.as_deref(),
             cache_dir.as_deref(),
+            build_info.is_in_rerun_workspace,
         );
     }
 
@@ -476,7 +491,11 @@ fn custom_windows_decorations_resize_ui(ui: &egui::Ui) {
     ];
 
     for (rect, direction, cursor_icon, id) in resize_regions {
-        let response = ui.interact(rect, ui.id().with(id), egui::Sense::click_and_drag());
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id(id),
+            egui::Sense::click_and_drag(),
+        );
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(cursor_icon);
         }
@@ -510,7 +529,7 @@ pub(super) fn paint_custom_window_frame(egui_ctx: &egui::Context) {
 
     let painter = egui::Painter::new(
         egui_ctx.clone(),
-        egui::LayerId::new(egui::Order::TOP, egui::Id::new("native_window_frame")),
+        egui::LayerId::new(egui::Order::TOP, egui::Id::unique("native_window_frame")),
         egui::Rect::EVERYTHING,
     );
 
@@ -543,8 +562,10 @@ pub(super) fn preview_files_being_dropped(egui_ctx: &egui::Context) {
             }
         });
 
-        let painter =
-            egui_ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("file_drop_target")));
+        let painter = egui_ctx.layer_painter(LayerId::new(
+            Order::Foreground,
+            Id::unique("file_drop_target"),
+        ));
 
         let screen_rect = egui_ctx.content_rect();
         painter.rect_filled(

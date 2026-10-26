@@ -104,7 +104,8 @@ After adding a new timeseries view via the blueprint panel, we select the Protob
 
 ### View decoded message
 
-Each entity that was decoded from an unknown MCAP message via reflection has an `.message` component, which contains queryable struct fields.
+Each entity that was decoded from an unknown MCAP message via reflection has a `message` component, which contains queryable struct fields.
+The column name includes the message's full type name, so a custom `my_robot.GripperState` message on `/gripper` is queried as the column `/gripper:my_robot.GripperState:message`.
 You can see this also in the selection panel:
 
 <picture>
@@ -135,4 +136,4 @@ Please refer to the `rosbags` documentation for further information.
 To request support for additional message types:
 
 - [File a GitHub issue](https://github.com/rerun-io/rerun/issues) requesting the specific message type
-- Join the Rerun community on [Discord](https://discord.gg/PXtCgFBSmH) to discuss and provide feedback on message support priorities. Or if you're open for a conversation, [sign up here](https://rerun.io/feedback)
+- Join the Rerun community on [Discord](https://discord.gg/Gcm8BbTaAj) to discuss and provide feedback on message support priorities. Or if you're open for a conversation, [sign up here](https://rerun.io/feedback)

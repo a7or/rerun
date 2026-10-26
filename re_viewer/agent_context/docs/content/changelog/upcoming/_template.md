@@ -1,7 +1,7 @@
 ---
 title: Changeset entry (template)
 hidden: true
-type: feature # highlight | breaking | feature
+type: feature # highlight | misc | breaking | feature
 ---
 
 <!--
@@ -19,11 +19,20 @@ type: feature # highlight | breaking | feature
    hidden — keep `true`; it keeps the in-flight entry out of the navigation.
    type   — which section the entry belongs in. One of:
               highlight  — a flagship change worth selling at the top of the notes
+              misc       — concise user-facing information, rendered as one list item
               breaking   — a breaking change; MUST include a migration guide
               feature    — a user-facing feature; SHOULD link docs and/or an example
 
  At release time, an agent merges every file in this folder into the release's
  `changeset-0-XX.md`, grouping by `type`, then empties the folder.
+ A `misc` entry becomes one list item under `## Other`, combining its heading and body;
+ the release changeset has no headings or prose outside those list items.
+
+ Keep it short: one to three sentences on what the user can now do.
+ Leave out implementation details and anything the user doesn't need to know.
+ Stick to facts, not sales copy, and reserve `highlight` for flagship changes.
+ If the feature is partial (e.g. data types without viewer support yet), say what doesn't work yet.
+ A breaking change gets a new migration guide; never edit the migration guides of past releases.
 
  For each entry, consider:
    * Migration guide   — required for any breaking change. Show before/after.

@@ -1,23 +1,23 @@
 {
   "packages": {
     "re_viewer": {
-      "version": "0.38.1",
-      "archive_sha256": "5fc336cf78c7ba28212da4658a74ef916509c5c2d2a82b23c340debfd613954d",
-      "source": "https://static.crates.io/crates/re_viewer/re_viewer-0.38.1.crate",
+      "version": "0.40.0",
+      "archive_sha256": "5c653002f24697c321638a803c1fdbc99ca513fe87f8758480f61a3064dbe3da",
+      "source": "https://static.crates.io/crates/re_viewer/re_viewer-0.40.0.crate",
       "changes": [
         "Remove the exact = prefix from the wasm-bindgen 0.2.126 dependency in normalized Cargo.toml.",
-        "Omit original registry .cargo_vcs_info.json; Git lockfile records fork provenance."
+        "Omit original registry .cargo_vcs_info.json; Git records fork provenance."
       ]
     },
     "re_redap_browser": {
-      "version": "0.38.1",
-      "archive_sha256": "eb55c73cbe88804ea673aa9feee00d8a6eca0b0b3bd0a976371d95b4e4e571ad",
-      "source": "https://static.crates.io/crates/re_redap_browser/re_redap_browser-0.38.1.crate",
+      "version": "0.40.0",
+      "archive_sha256": "64023b80e3d80ad3268e59115796104bea72c7e73fb4ca4f1f2b0727820b0476",
+      "source": "https://static.crates.io/crates/re_redap_browser/re_redap_browser-0.40.0.crate",
       "changes": [
         "Remove the exact = prefix from the wasm-bindgen 0.2.126 dependency in normalized Cargo.toml.",
-        "Omit original registry .cargo_vcs_info.json; Git lockfile records fork provenance."
+        "Omit original registry .cargo_vcs_info.json; Git records fork provenance."
       ]
     }
   },
-  "license_text_source": "Upstream rerun-io/rerun 0.39.0 release checkout, LICENSE-MIT and LICENSE-APACHE."
+  "license_text_source": "Upstream rerun-io/rerun 0.40.0 release checkout, LICENSE-MIT and LICENSE-APACHE."
 }

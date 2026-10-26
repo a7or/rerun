@@ -33,7 +33,7 @@ snippet: howto/load_mcap
 
 ### Python `McapReader`
 
-For custom ingestion or processing pipelines, use the Python [`McapReader`](https://ref.rerun.io/docs/python/stable/chunk#rerun.chunk.McapReader) to read an MCAP file into a [`LazyChunkStream`](https://ref.rerun.io/docs/python/stable/experimental/#rerun.chunk.LazyChunkStream) that can be used to build custom data wrangling pipelines.
+For custom ingestion or processing pipelines, use the Python [`McapReader`](https://ref.rerun.io/docs/python/stable/chunk#rerun.chunk.McapReader) to read an MCAP file into a [`LazyChunkStream`](https://ref.rerun.io/docs/python/stable/chunk/#rerun.chunk.LazyChunkStream) that can be used to build custom data wrangling pipelines.
 For example, you can inspect file metadata with `reader.info()`, select decoders, filter topics or time ranges, transform chunks using [Lenses](../../concepts/query-and-transform/lenses.md), and write the result to RRD:
 
 snippet: howto/process_mcap[example]
@@ -52,6 +52,18 @@ rerun mcap convert input.mcap -o output.rrd
 # View the converted file
 rerun output.rrd
 ```
+
+## Recording ROS 2 bags as RRD
+
+If you use rosbag2, you can record straight to RRD with [`rosbag2_storage_rrd`](https://github.com/rerun-io/rosbag2_storage_rrd), an experimental rosbag2 storage plugin:
+
+```bash
+ros2 bag record -s rrd --all
+```
+
+`ros2 bag play` replays the bag, and Rerun opens and queries it like any other `.rrd`.
+It can also stream to a running Viewer while recording.
+See the plugin's [README](https://github.com/rerun-io/rosbag2_storage_rrd#readme) for its current status and build instructions.
 
 ## Data model
 

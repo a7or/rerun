@@ -1,7 +1,7 @@
 //! Where an asset was registered from, opened from its card.
 
+use re_catalog_client::AssetLayer;
 use re_log_types::external::re_types_core::SegmentId;
-use re_redap_client::AssetLayer;
 use re_ui::UiExt as _;
 use re_ui::modal::{ModalHandler, ModalWrapper};
 
@@ -54,13 +54,13 @@ impl AssetSourceModal {
 
                     // A single layer is the common case, and its name says nothing useful, so only
                     // show layer names when there is more than one.
-                    ui.strong(if state.layers.len() > 1 {
+                    let label = ui.strong(if state.layers.len() > 1 {
                         layer.name.as_str()
                     } else {
                         "Source URI"
                     });
 
-                    read_only_field_ui(ui, index, &layer.storage_url);
+                    read_only_field_ui(ui, index, &layer.storage_url, label.id);
                 }
 
                 ui.add_space(8.0);
@@ -91,7 +91,7 @@ impl AssetSourceModal {
 /// egui paints a read-only `TextEdit` with a transparent background, so the frame is drawn here
 /// instead, and the text is paler than in an editable field. The field starts scrolled to the end,
 /// since that is where one source URI differs from another.
-fn read_only_field_ui(ui: &mut egui::Ui, id_salt: usize, value: &str) {
+fn read_only_field_ui(ui: &mut egui::Ui, id_salt: usize, value: &str, label_id: egui::Id) {
     let tokens = ui.tokens();
     let field = ui.visuals().widgets.inactive;
 
@@ -115,7 +115,8 @@ fn read_only_field_ui(ui: &mut egui::Ui, id_salt: usize, value: &str) {
                             // Lay out the whole URI, and let the scroll area move within it.
                             .clip_text(false)
                             .text_color(tokens.text_readonly),
-                    );
+                    )
+                    .labelled_by(label_id);
                 });
         });
 }
@@ -169,8 +170,6 @@ mod tests {
             egui::Vec2::new(500.0, 300.0),
         )
         .build_ui(|ui| {
-            re_ui::apply_style_and_install_loaders(ui.ctx());
-
             modal.ui(ui);
         });
 

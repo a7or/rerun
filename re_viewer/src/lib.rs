@@ -32,8 +32,10 @@ mod agent_panel;
 mod app;
 mod app_blueprint;
 mod app_state;
+mod audio_output;
 mod background_tasks;
 mod catalog_handle;
+mod command_catalog;
 mod command_palette;
 mod default_views;
 mod docker_detection;
@@ -41,17 +43,23 @@ pub mod env_vars;
 pub mod event;
 mod external_memory;
 mod history;
+mod konami;
 mod latency_tracker;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod navigation;
-mod open_url_description;
 mod prefetch_chunks;
+mod registrations_in_flight;
 mod saving;
+mod screen_highlight;
 mod screenshotter;
+mod server_connections;
 mod startup_options;
 mod texture_readback;
 mod ui;
 mod version_check;
 mod viewer_log;
+mod viewer_url_description;
 
 #[cfg(feature = "analytics")]
 mod viewer_analytics;
@@ -140,7 +148,7 @@ pub enum AppEnvironment {
     CSdk,
 
     /// Created from the Rerun Python SDK.
-    PythonSdk(re_log_types::PythonVersion),
+    PythonSdk(re_log_msg::PythonVersion),
 
     /// Created from the Rerun Rust SDK.
     RustSdk {
@@ -165,8 +173,8 @@ pub enum AppEnvironment {
 }
 
 impl AppEnvironment {
-    pub fn from_store_source(source: &re_log_types::StoreSource) -> Self {
-        use re_log_types::StoreSource;
+    pub fn from_store_source(source: &re_log_msg::StoreSource) -> Self {
+        use re_log_msg::StoreSource;
         match source {
             StoreSource::CSdk => Self::CSdk,
 
@@ -282,6 +290,13 @@ pub fn customize_eframe_and_setup_renderer(
     }
 
     re_ui::apply_style_and_install_loaders(&cc.egui_ctx);
+
+    // Any glyph we cannot render is a bug, so make tests fail loudly instead of drawing tofu.
+    if cfg!(feature = "testing") {
+        cc.egui_ctx
+            .set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
+    }
+
     Ok(())
 }
 

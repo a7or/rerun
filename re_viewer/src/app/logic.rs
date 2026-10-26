@@ -6,7 +6,8 @@ use re_log_channel::{
     BlueprintTarget, DataSourceMessage, DefaultBlueprintRegistration, RecordingOpenBehavior,
     ViewerControlCommand,
 };
-use re_log_types::{LogMsg, StoreId, StoreKind, TableMsg};
+use re_log_msg::{LogMsg, TableMsg};
+use re_log_types::{StoreId, StoreKind};
 use re_viewer_context::{
     Item, Route, StoreHub, SystemCommand, SystemCommandSender as _, TableStore,
 };
@@ -64,6 +65,23 @@ impl App {
             let (storage_context, store_context) =
                 store_hub.read_context(&route, &active_time_ctrl);
 
+            // The menu might be visible while the viewer is minimized, so we also handle these
+            // commands here
+            #[cfg(target_os = "macos")]
+            if self.uses_native_menu() {
+                let pending = crate::native_menu::take_pending();
+                if !pending.is_empty() {
+                    let commands =
+                        self.command_context(storage_context.hub, store_context.as_ref());
+                    for command in pending
+                        .into_iter()
+                        .filter_map(|kind| commands.resolve(kind))
+                    {
+                        crate::command_catalog::dispatch(command, &self.command_sender);
+                    }
+                }
+            }
+
             let blueprint = store_context.as_ref().map(|ctx| ctx.blueprint);
             let blueprint_query = self.state.blueprint_query_for_viewer(blueprint);
 
@@ -74,7 +92,6 @@ impl App {
                 self.panel_state_overrides_active
                     .then_some(self.panel_state_overrides),
             );
-
             self.run_pending_ui_commands(
                 egui_ctx,
                 &app_blueprint,
@@ -82,33 +99,26 @@ impl App {
                 store_context.as_ref(),
                 &route,
             );
+            // Here too, and not only in `ui`, so that a hidden viewer still runs them. A
+            // viewer-control request waits for them.
+            self.run_pending_recording_commands(
+                egui_ctx,
+                &app_blueprint,
+                &storage_context,
+                store_context.as_ref(),
+            );
         }
+
+        // The commands above may queue system commands, and answer viewer-control requests that
+        // wait on them.
+        self.run_pending_system_commands(&mut store_hub, egui_ctx);
 
         self.state.cleanup(&store_hub);
 
-        self.sync_native_window_theme(egui_ctx);
         self.sync_native_window_decorations(egui_ctx);
 
         // Return the `StoreHub` to the Viewer so we have it on the next frame
         self.store_hub = Some(store_hub);
-    }
-
-    /// Keep the OS window's appearance in sync with our egui theme.
-    ///
-    /// This affects the way the macOS traffic light buttons are painted. Without this,
-    /// they look wrong when the themes mismatch and the window isn't focused.
-    // TODO(emilk/egui#8299): Remove once the egui fix lands
-    fn sync_native_window_theme(&mut self, egui_ctx: &egui::Context) {
-        let window_theme = match egui_ctx.options(|o| o.theme_preference) {
-            egui::ThemePreference::System => egui::SystemTheme::SystemDefault,
-            egui::ThemePreference::Dark => egui::SystemTheme::Dark,
-            egui::ThemePreference::Light => egui::SystemTheme::Light,
-        };
-
-        if self.last_window_theme != Some(window_theme) {
-            self.last_window_theme = Some(window_theme);
-            egui_ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(window_theme));
-        }
     }
 
     /// Hand the window decorations over to the OS, or take them over ourselves.
@@ -549,7 +559,7 @@ impl App {
                     }
                 )
                     .no_toast()
-                    .permanent_dismiss_id(egui::Id::new("install_native_viewer_prompt"));
+                    .permanent_dismiss_id(egui::Id::unique("install_native_viewer_prompt"));
                 self.command_sender
                     .send_system(SystemCommand::ShowNotification(notification));
             });
@@ -840,7 +850,7 @@ impl App {
         // dropping them means downloading the same asset again for the next segment that wants it,
         // which is exactly what the cache exists to avoid.
         if limit.is_exceeded_by(&memory_use()).is_some() {
-            self.connection_registry.purge_memory();
+            self.connections.registry.purge_memory();
         }
 
         let mem_use_after = MemoryUse::capture();

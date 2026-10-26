@@ -1,82 +1,100 @@
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Context as _;
+use re_catalog_client::CatalogClient;
 use re_protos::cloud::v1alpha1::ext::ObjectKey;
-use re_redap_client::{ConnectionHandle, ConnectionRegistryHandle};
+use re_redap_client::ConnectionRegistryHandle;
 
-/// A [`ConnectionHandle`] that knows whether its origin is the internal catalog.
-///
-/// The distinction matters for writes: the internal catalog runs in-process, so it can read a
-/// local file where it already lies on native and out of OPFS in the browser, while a remote
-/// catalog hands out write access grants (see [`ConnectionHandle::write_object`]).
+/// The Viewer-owned catalog that runs in this process.
+#[derive(Clone, Debug)]
+pub struct InternalCatalog {
+    catalog_client: CatalogClient,
+
+    /// Where it keeps the files it owns.
+    storage_dir: std::path::PathBuf,
+}
+
+impl InternalCatalog {
+    /// The internal catalog, if it is running.
+    fn new(registry: &ConnectionRegistryHandle) -> Option<Self> {
+        Some(Self {
+            catalog_client: CatalogClient::new(registry.internal_connection_handle()?),
+            storage_dir: registry.internal_storage_dir()?.to_owned(),
+        })
+    }
+}
+
+/// A [`CatalogClient`] tagged with whether its origin is the internal catalog.
 #[derive(Clone, Debug)]
 pub enum CatalogHandle {
-    Internal {
-        connection: ConnectionHandle,
-        storage_dir: std::path::PathBuf,
-    },
-    Remote(ConnectionHandle),
+    Internal(InternalCatalog),
+    Remote(CatalogClient),
 }
 
 impl CatalogHandle {
-    /// The connection to `origin`, tagged with whether it is the internal catalog.
+    /// The catalog client for `origin`, tagged with whether it is the internal catalog.
     #[expect(dead_code, reason = "remote catalog registration is not wired up yet")]
     pub fn for_origin(registry: &ConnectionRegistryHandle, origin: &re_uri::Origin) -> Self {
-        let connection = registry.connection_handle(origin.clone());
         if registry.is_internal_origin(origin)
-            && let Some(storage_dir) = registry.internal_storage_dir()
+            && let Some(internal) = InternalCatalog::new(registry)
         {
-            Self::Internal {
-                connection,
-                storage_dir: storage_dir.to_owned(),
-            }
+            Self::Internal(internal)
         } else {
-            Self::Remote(connection)
+            Self::Remote(CatalogClient::new(
+                registry.connection_handle(origin.clone()),
+            ))
         }
     }
 
     /// The internal catalog, if it is running.
     pub fn internal(registry: &ConnectionRegistryHandle) -> Option<Self> {
-        Some(Self::Internal {
-            connection: registry.internal_connection_handle()?,
-            storage_dir: registry.internal_storage_dir()?.to_owned(),
-        })
+        InternalCatalog::new(registry).map(Self::Internal)
     }
 
-    pub fn connection(&self) -> &ConnectionHandle {
+    pub fn client(&self) -> &CatalogClient {
         match self {
-            Self::Internal { connection, .. } | Self::Remote(connection) => connection,
+            Self::Internal(InternalCatalog { catalog_client, .. })
+            | Self::Remote(catalog_client) => catalog_client,
         }
+    }
+
+    /// Whether this is the Viewer-owned internal catalog.
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::Internal(_))
     }
 
     /// Makes `file` available to the catalog and returns its credential-free URL.
     ///
     /// On native, the internal catalog reads the file in place instead of copying it.
-    pub async fn write_file(
+    /// In the browser, it reuses an existing OPFS copy with the same fingerprint and size.
+    /// Remote catalogs determine their own existing-key behavior.
+    pub async fn stage_file(
         &self,
+        fingerprint: re_log_encoding::RrdFingerprint,
         #[cfg(not(target_arch = "wasm32"))] file: std::path::PathBuf,
         #[cfg(target_arch = "wasm32")] file: web_sys::File,
     ) -> anyhow::Result<url::Url> {
         cfg_select! {
             target_arch = "wasm32" => {
                 let source = re_web::fs::File::from(file.clone());
-                let key = object_key(&source, &file.name()).await?;
+                let key = object_key(fingerprint)?;
                 match self {
-                    Self::Internal { storage_dir, .. } => write_to_opfs(storage_dir, key, file).await,
-                    // TODO(RR-5489, RR-5490): Implement `GetWriteAccessGrant` on the server.
-                    Self::Remote(connection) => connection
-                        .write_object(key, source)
-                        .await
-                        .map_err(|err| {
+                    Self::Internal(InternalCatalog { storage_dir, .. }) => {
+                        write_to_opfs(storage_dir, key, file).await
+                    }
+                    Self::Remote(catalog_client) => {
+                        catalog_client.stage(key, source).await.map_err(|err| {
                             anyhow::anyhow!(
-                                "failed to upload file to {}: {err}",
-                                connection.origin()
+                                "failed to stage file: {err}\nCatalog: {}",
+                                catalog_client.origin()
                             )
-                        }),
+                        })
+                    }
                 }
             }
             _ => {
                 match self {
                     // The catalog runs in this process, so it reads the file where it already is.
-                    Self::Internal { .. } => {
+                    Self::Internal(_) => {
                         let file = std::path::absolute(&file).with_context(|| {
                             format!(
                                 "failed to resolve absolute path\nFile path: {}",
@@ -89,20 +107,19 @@ impl CatalogHandle {
                                 file.display()
                             )
                         })
-                    },
-                    // TODO(RR-5489, RR-5490): Implement `GetWriteAccessGrant` on the server.
-                    Self::Remote(connection) => {
+                    }
+                    Self::Remote(catalog_client) => {
                         let source = std::fs::File::open(&file).map_err(|err| {
                             anyhow::anyhow!(
                                 "failed to open file for upload: {err}\nFile path: {}",
                                 file.display()
                             )
                         })?;
-                        let key = object_key(&source, &file.to_string_lossy()).await?;
-                        connection.write_object(key, source).await.map_err(|err| {
+                        let key = object_key(fingerprint)?;
+                        catalog_client.stage(key, source).await.map_err(|err| {
                             anyhow::anyhow!(
-                                "failed to upload file to {}: {err}",
-                                connection.origin()
+                                "failed to stage file: {err}\nCatalog: {}",
+                                catalog_client.origin()
                             )
                         })
                     }
@@ -121,12 +138,12 @@ impl CatalogHandle {
         bytes: bytes::Bytes,
     ) -> anyhow::Result<url::Url> {
         match self {
-            Self::Internal { storage_dir, .. } => {
+            Self::Internal(InternalCatalog { storage_dir, .. }) => {
                 write_internal_bytes(storage_dir, &key, bytes).await
             }
-            Self::Remote(connection) => anyhow::bail!(
+            Self::Remote(catalog_client) => anyhow::bail!(
                 "writing bytes to remote catalog {} is not implemented",
-                connection.origin()
+                catalog_client.origin()
             ),
         }
     }
@@ -135,11 +152,8 @@ impl CatalogHandle {
 /// The key under which a catalog stores its copy of an RRD.
 ///
 /// Derived from the RRD fingerprint, so re-opening the same file addresses the existing object.
-async fn object_key(source: &impl re_async::AsyncReadAt, name: &str) -> anyhow::Result<ObjectKey> {
-    let fingerprint = re_log_encoding::RrdFingerprint::compute_for_rrd(source)
-        .await
-        .with_context(|| format!("failed to fingerprint RRD\nFile path: {name}"))?;
-    let fingerprint = re_log_encoding::sha256_to_hex(fingerprint.as_bytes());
+fn object_key(fingerprint: re_log_encoding::RrdFingerprint) -> anyhow::Result<ObjectKey> {
+    let fingerprint = re_chunk_index::sha256_to_hex(fingerprint.as_bytes());
     Ok(ObjectKey::try_new(format!(
         "uploads/{fingerprint}/recording.rrd"
     ))?)
@@ -237,11 +251,9 @@ fn internal_object_url(storage_dir: &std::path::Path, key: &ObjectKey) -> anyhow
             url.set_path(path_str);
             Ok(url)
         }
-        _ => {
-            url::Url::from_file_path(&path).map_err(|()| {
-                anyhow::anyhow!("not an absolute file path\nFile path: {}", path.display())
-            })
-        }
+        _ => url::Url::from_file_path(&path).map_err(|()| {
+            anyhow::anyhow!("not an absolute file path\nFile path: {}", path.display())
+        }),
     }
 }
 

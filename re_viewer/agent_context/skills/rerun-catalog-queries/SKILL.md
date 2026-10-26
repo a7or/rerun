@@ -1,6 +1,6 @@
 ---
 name: rerun-catalog-queries
-description: Performance patterns and gotchas for querying a Rerun catalog from Python. Reach for this when a CatalogClient/dataset query is unexpectedly slow, or when shaping a per-segment / per-episode pipeline that hits the catalog from many places.
+description: Performance patterns and gotchas for querying a Rerun catalog from Python. Reach for this when exploring an unfamiliar dataset, when a CatalogClient/dataset query is unexpectedly slow, or when shaping a per-segment / per-episode pipeline that hits the catalog from many places.
 user_invocable: true
 allowed-tools: Read, Grep, Bash
 ---
@@ -45,12 +45,11 @@ The single biggest lever:
 - `filter_contents([entity_globs])` restricts which entity-path columns
   the reader produces. Without it, every entity in the dataset is
   read.
-- For Scalars-typed columns this also reduces array nesting depth from
-  `list<list<double>>` to `list<double>`.
-- Time-window filters (`df.filter(col(index).cast(int64) >= start)
-  .filter(col(index).cast(int64) <= end)`) push down to storage and
-  dramatically reduce bytes scanned. The order matters: filter then
-  reader-bound projection, never the other way around.
+- Time-window filters push down to storage and dramatically reduce
+  bytes scanned when they compare the bare index column with a literal:
+  `df.filter(col(index) >= lit(start)).filter(col(index) <= lit(end))`.
+  Integer, timestamp and duration literals of any unit work. A `cast`
+  or arithmetic on the index column is not pushed down.
 
 Combined: `dataset.filter_segments(seg).filter_contents(entities).reader(...)
 .filter(in_window).select(...)`.
@@ -198,6 +197,34 @@ data on most plans.
 
 For a strict in-window presence check, prefer per-entity `limit(1)`
 over the time-filtered reader, run concurrently.
+
+---
+
+## Explore an unfamiliar dataset with `dataset.info()`
+
+```python
+info = dataset.info()
+print(info)  # compact text overview
+```
+
+It reports the segment count and size, each layer with how many
+segments have it, each timeline with its kind, value range and segment
+coverage, and the property column names. It reads only the segment
+table and the schema, no recording data, so it stays cheap on large
+datasets.
+
+Use it to choose `reader(index=…)` and to bound time-window filters
+before the first real query. `TimelineInfo.min` / `.max` are numpy
+values that work directly as literals:
+
+```python
+ts = next(t for t in info.timelines if t.name == "capture_time")
+df = dataset.reader(index=ts.name).filter(col(ts.name) >= lit(ts.min))
+```
+
+Properties found here can be filtered via `dataset.segment_table()`,
+and layer names tell you what `register(…, layer_name=…)` already
+attached.
 
 ---
 

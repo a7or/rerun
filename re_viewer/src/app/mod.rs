@@ -10,13 +10,14 @@ use re_data_source::{AuthErrorHandler, LogDataSource};
 use re_entity_db::InstancePath;
 use re_entity_db::entity_db::EntityDb;
 use re_log_channel::{LogReceiverSet, RecordingOpenBehavior, SaveScreenshotError};
-use re_log_types::{ApplicationId, FileSource, RecordingId, StoreId};
+use re_log_msg::FileSource;
+use re_log_types::{ApplicationId, RecordingId, StoreId};
 use re_redap_client::ConnectionRegistryHandle;
 use re_sdk_types::blueprint::components::PlayState;
 use re_types_core::reflection::ComponentReflectionMap;
-use re_ui::{ContextExt as _, UICommand, UICommandSender as _, notifications};
-use re_viewer_context::open_url::{OpenUrlOptions, ViewerOpenUrl};
+use re_ui::{ContextExt as _, UiExt as _, notifications};
 use re_viewer_context::store_hub::{BlueprintPersistence, StoreHub};
+use re_viewer_context::viewer_url::{OpenUrlOptions, ViewerUrl};
 use re_viewer_context::{
     AppBlueprintCtx, AppOptions, AuthContext, CommandReceiver, CommandSender, ComponentUiRegistry,
     EditRedapServerModalCommand, FallbackProviderRegistry, Item, NeedsRepaint, Route,
@@ -27,7 +28,7 @@ use re_viewer_context::{
 use crate::app_blueprint::{AppBlueprint, PanelStateOverrides};
 use crate::background_tasks::BackgroundTasks;
 use crate::event::ViewerEventDispatcher;
-use crate::latency_tracker::ServerLatencyTrackers;
+use crate::server_connections::ServerConnections;
 use crate::startup_options::StartupOptions;
 use crate::{AppState, command_palette::CommandPaletteAction};
 
@@ -36,8 +37,13 @@ mod add_data_source;
 mod assets;
 mod command_handling;
 mod logic;
+#[cfg(not(target_arch = "wasm32"))]
+mod profile_capture;
 mod ui;
 mod viewer_control;
+
+#[cfg(not(target_arch = "wasm32"))]
+use self::profile_capture::PendingProfileCapture;
 
 /// Only `web.rs` needs this by name; on native, `logic` calls it directly.
 #[cfg(target_arch = "wasm32")]
@@ -59,7 +65,7 @@ const REDAP_TOKEN_KEY: &str = "rerun.redap_token";
 /// pairs the stashed command with the *live* active recording and dispatches it — so it can
 /// never target a stale recording.
 fn pending_timeline_shortcut_key() -> egui::Id {
-    egui::Id::new("rerun_pending_timeline_shortcut")
+    egui::Id::unique("rerun_pending_timeline_shortcut")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -92,7 +98,17 @@ pub struct App {
     ram_limit_warner: re_memory::RamLimitWarner,
     pub(crate) egui_ctx: egui::Context,
     egui_renderer: Option<Arc<egui::epaint::mutex::RwLock<egui_wgpu::Renderer>>>,
+
+    /// Graphics backend of the wgpu adapter, or [`wgpu::Backend::Noop`] without one.
+    adapter_backend: wgpu::Backend,
+
     screenshotter: crate::screenshotter::Screenshotter,
+
+    /// Screenshots delivered by the renderer, waiting to be processed on the next frame.
+    screenshot_tx:
+        std::sync::mpsc::Sender<(re_viewer_context::ScreenshotInfo, Arc<egui::ColorImage>)>,
+    screenshot_rx:
+        std::sync::mpsc::Receiver<(re_viewer_context::ScreenshotInfo, Arc<egui::ColorImage>)>,
     texture_readback: crate::texture_readback::TextureReadbacks,
 
     /// Notifiers waiting for a file-path screenshot to finish writing.
@@ -100,6 +116,9 @@ pub struct App {
         camino::Utf8PathBuf,
         re_log_channel::UiCallback<Result<(), SaveScreenshotError>>,
     >,
+
+    /// `ViewerControlService` answers held back until the commands they queued have run.
+    pending_viewer_control_replies: Vec<viewer_control::PendingReply>,
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) popstate_listener: Option<crate::web_history::PopstateListener>,
@@ -109,7 +128,7 @@ pub struct App {
 
     /// Active in-memory profile capture, if any.
     #[cfg(not(target_arch = "wasm32"))]
-    profile_capture: Option<re_tracing::ProfileCapture>,
+    profile_capture: Option<PendingProfileCapture>,
 
     /// Listens to the local text log stream
     text_log_rx: crossbeam::channel::Receiver<re_log::LogMsg>,
@@ -139,6 +158,10 @@ pub struct App {
     /// Recent log messages, served to agents through `re_viewer_mcp`.
     pub(crate) viewer_log: crate::viewer_log::ViewerLog,
 
+    /// A rectangle an agent asked the viewer to point the user at, painted on top of everything
+    /// until the user clicks.
+    screen_highlight: Option<crate::screen_highlight::ScreenHighlight>,
+
     dev_panel: crate::dev_panel::DevPanel,
     dev_panel_open: bool,
 
@@ -162,9 +185,6 @@ pub struct App {
     /// Measures how long a frame takes to paint
     pub(crate) frame_time_history: egui::util::History<f32>,
 
-    /// The last theme we pushed to the OS window (via [`egui::ViewportCommand::SetTheme`]).
-    last_window_theme: Option<egui::SystemTheme>,
-
     /// Read via [`Self::custom_window_decorations`].
     window_decorations_request: WindowDecorationsRequest,
 
@@ -172,6 +192,9 @@ pub struct App {
     pub command_sender: CommandSender,
     command_receiver: CommandReceiver,
     cmd_palette: re_ui::CommandPalette,
+    about_modal: re_ui::modal::ModalHandler,
+    #[cfg(debug_assertions)]
+    debug_tools_modal: re_ui::modal::ModalHandler,
 
     /// All known view types.
     view_class_registry: ViewClassRegistry,
@@ -184,9 +207,7 @@ pub struct App {
     /// External interactions with the Viewer host (JS, custom egui app, notebook, etc.).
     pub event_dispatcher: Option<ViewerEventDispatcher>,
 
-    connection_registry: ConnectionRegistryHandle,
-
-    pub(crate) server_latency_trackers: ServerLatencyTrackers,
+    pub(crate) connections: ServerConnections,
 
     /// The async runtime that should be used for all asynchronous operations.
     ///
@@ -233,6 +254,12 @@ impl App {
         command_channel: (CommandSender, CommandReceiver),
     ) -> Self {
         re_tracing::profile_function!();
+
+        // Install ring as the default provider for reqwest 0.13.
+        #[cfg(not(target_arch = "wasm32"))]
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
 
         let is_test = app_env.is_test();
         let egui_renderer = creation_context
@@ -338,6 +365,10 @@ impl App {
             });
         }
 
+        if let Some(check_for_updates_on_startup) = startup_options.check_for_updates_on_startup {
+            state.app_options.check_for_updates_on_startup = check_for_updates_on_startup;
+        }
+
         if state.app_options.check_for_updates_on_startup {
             crate::version_check::check_for_new_version(build_info.version, &app_env, ehttp::fetch);
         }
@@ -347,13 +378,11 @@ impl App {
                 && connection_registry.internal_origin().is_none()
             {
                 let catalog = cfg_select! {
-                    target_arch = "wasm32" => { crate::internal_catalog::build() }
-                    _ => {
-                        crate::internal_catalog::build(std::net::SocketAddr::from((
-                            std::net::Ipv4Addr::LOCALHOST,
-                            re_uri::DEFAULT_PROXY_PORT,
-                        )))
-                    }
+                    target_arch = "wasm32" => crate::internal_catalog::build(),
+                    _ => crate::internal_catalog::build(std::net::SocketAddr::from((
+                        std::net::Ipv4Addr::LOCALHOST,
+                        re_uri::DEFAULT_PROXY_PORT,
+                    ))),
                 };
 
                 connection_registry
@@ -393,11 +422,15 @@ impl App {
         }
 
         let (command_sender, command_receiver) = command_channel;
+        // Unbounded: the sender is a renderer callback that must never block,
+        // and it delivers at most one image per frame.
+        #[expect(clippy::disallowed_methods)]
+        let (screenshot_tx, screenshot_rx) = std::sync::mpsc::channel();
 
         let mut component_ui_registry = re_component_ui::create_component_ui_registry();
         re_data_ui::register_component_uis(&mut component_ui_registry);
 
-        let (_adapter_backend, _device_tier) = creation_context.wgpu_render_state.as_ref().map_or(
+        let (adapter_backend, _device_tier) = creation_context.wgpu_render_state.as_ref().map_or(
             (
                 wgpu::Backend::Noop,
                 re_renderer::device_caps::DeviceCapabilityTier::Limited,
@@ -430,7 +463,7 @@ impl App {
             analytics.record(event::viewer_started(
                 &app_env,
                 &creation_context.egui_ctx,
-                _adapter_backend,
+                adapter_backend,
                 _device_tier,
             ));
         }
@@ -443,7 +476,7 @@ impl App {
             .map(ViewerEventDispatcher::new);
 
         if !state.redap_servers.is_empty() {
-            command_sender.send_ui(UICommand::ExpandBlueprintPanel);
+            command_sender.send_system(SystemCommand::ExpandFallbackBlueprintPanel);
         }
 
         creation_context.egui_ctx.on_end_pass(
@@ -458,6 +491,8 @@ impl App {
                 });
             }),
         );
+
+        crate::konami::install(&creation_context.egui_ctx);
 
         {
             // This is a workaround consuming the space and arrow keys so we can use them as timeline shortcuts.
@@ -503,9 +538,13 @@ impl App {
             ram_limit_warner: re_memory::RamLimitWarner::warn_at_fraction_of_max(0.75),
             egui_ctx: creation_context.egui_ctx.clone(),
             egui_renderer,
+            adapter_backend,
             screenshotter,
+            screenshot_tx,
+            screenshot_rx,
             texture_readback: Default::default(),
             pending_screenshot_notifiers: Default::default(),
+            pending_viewer_control_replies: Default::default(),
 
             #[cfg(target_arch = "wasm32")]
             popstate_listener: None,
@@ -537,6 +576,7 @@ impl App {
             table_blueprints: Default::default(),
             notifications: notifications::NotificationUi::new(creation_context.egui_ctx.clone()),
             viewer_log: Default::default(),
+            screen_highlight: None,
 
             dev_panel: Default::default(),
             dev_panel_open: false,
@@ -551,13 +591,15 @@ impl App {
             latest_latency_interest: None,
 
             frame_time_history: egui::util::History::new(1..100, 0.5),
-            last_window_theme: None,
 
             window_decorations_request: WindowDecorationsRequest::NotSent,
 
             command_sender,
             command_receiver,
             cmd_palette: Default::default(),
+            about_modal: Default::default(),
+            #[cfg(debug_assertions)]
+            debug_tools_modal: Default::default(),
 
             view_class_registry,
 
@@ -568,8 +610,7 @@ impl App {
 
             event_dispatcher,
 
-            connection_registry,
-            server_latency_trackers: ServerLatencyTrackers::default(),
+            connections: ServerConnections::new(connection_registry),
             async_runtime,
         }
     }
@@ -580,7 +621,7 @@ impl App {
     }
 
     pub fn connection_registry(&self) -> &ConnectionRegistryHandle {
-        &self.connection_registry
+        &self.connections.registry
     }
 
     /// Calls `callback` with the renderer context if WGPU rendering is available.
@@ -623,6 +664,10 @@ impl App {
         self.state.app_options_mut()
     }
 
+    pub fn redap_servers(&self) -> &re_redap_browser::RedapServers {
+        &self.state.redap_servers
+    }
+
     /// Open the dev panel, showing the given tab.
     pub fn show_dev_panel_tab(&mut self, tab: crate::dev_panel::DevPanelTab) {
         self.dev_panel_open = true;
@@ -647,6 +692,11 @@ impl App {
         }
     }
 
+    /// Graphics backend of the wgpu adapter, or [`wgpu::Backend::Noop`] without one.
+    pub fn adapter_backend(&self) -> wgpu::Backend {
+        self.adapter_backend
+    }
+
     pub fn app_env(&self) -> &crate::AppEnvironment {
         &self.app_env
     }
@@ -661,6 +711,36 @@ impl App {
     /// The active recording [`StoreId`], if any, derived from the current [`Route`].
     pub fn active_recording_id(&self) -> Option<&StoreId> {
         self.state.active_recording_id()
+    }
+
+    /// What context-dependent commands act on: the active recording, the selected Redap server,
+    /// and the table being viewed.
+    ///
+    /// Keyboard shortcuts, the command palette, and `ViewerControlService` all bind commands
+    /// against this, so they agree on what a command does.
+    pub fn command_environment(&self) -> re_ui::CommandEnvironment {
+        let active_recording = self.state.navigation.current().recording_id().cloned();
+        let table = self.state.navigation.current().table_reference();
+
+        let selected_redap_server = match self.state.selection_state.selected_items().single_item()
+        {
+            Some(Item::RedapServer(origin)) if self.state.redap_servers.has_server(origin) => {
+                Some(origin.clone())
+            }
+            _ => None,
+        };
+
+        re_ui::CommandEnvironment {
+            recording: active_recording,
+            has_editable_redap_server: selected_redap_server
+                .as_ref()
+                .is_some_and(|origin| !self.state.redap_servers.is_internal_server(origin)),
+            redap_server: selected_redap_server,
+            has_table_blueprint: table
+                .as_ref()
+                .is_some_and(|table| self.table_blueprints.active_id(table).is_some()),
+            table,
+        }
     }
 
     /// The route for `item`, filling in what the catalog knows about a redap entry.
@@ -694,7 +774,7 @@ impl App {
 
     /// Open a content URL in the viewer.
     pub fn open_url_or_file(&self, url: &str) {
-        match ViewerOpenUrl::parse_with_options(
+        match ViewerUrl::parse_with_options(
             url,
             &re_data_source::FromUriOptions {
                 accept_extensionless_http: true,
@@ -949,7 +1029,7 @@ impl App {
 
         let selection = self.state.selection_state.selected_items();
 
-        let Ok(url) = ViewerOpenUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
+        let Ok(url) = ViewerUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
         else {
             return;
         };
@@ -967,7 +1047,7 @@ impl App {
             .and_then(|id| self.state.time_control(id));
         let selection = self.state.selection_state.selected_items();
 
-        let Ok(url) = ViewerOpenUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
+        let Ok(url) = ViewerUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
             .map(|mut url| {
                 // We don't want to update the url while playing, so we use the last paused time.
                 if let Some(fragment) = url.fragment_mut() {
@@ -1175,125 +1255,122 @@ impl App {
     fn process_screenshot_result(
         &mut self,
         image: &Arc<egui::ColorImage>,
-        user_data: &egui::UserData,
+        info: re_viewer_context::ScreenshotInfo,
     ) {
         use re_viewer_context::ScreenshotInfo;
 
-        if let Some(info) = user_data
-            .data
-            .as_ref()
-            .and_then(|data| data.downcast_ref::<ScreenshotInfo>())
-        {
-            let ScreenshotInfo {
-                ui_rect,
-                pixels_per_point,
-                name,
-                target,
-                notify,
-            } = (*info).clone();
+        let ScreenshotInfo {
+            ui_rect,
+            pixels_per_point,
+            name,
+            target,
+            notify,
+        } = info;
 
-            // Only used in the native `SaveToPath` branch below.
-            #[cfg(target_arch = "wasm32")]
-            let _ = notify;
+        // Only used in the native `SaveToPath` branch below.
+        #[cfg(target_arch = "wasm32")]
+        let _ = notify;
 
-            let rgba = if let Some(ui_rect) = ui_rect {
-                Arc::new(image.region(&ui_rect, Some(pixels_per_point)))
-            } else {
-                image.clone()
-            };
+        let rgba = if let Some(ui_rect) = ui_rect {
+            Arc::new(image.region(&ui_rect, Some(pixels_per_point)))
+        } else {
+            image.clone()
+        };
 
-            match target {
-                re_viewer_context::ScreenshotTarget::CopyToClipboard => {
-                    self.egui_ctx.copy_image((*rgba).clone());
+        match target {
+            re_viewer_context::ScreenshotTarget::CopyToClipboard => {
+                self.egui_ctx.copy_image((*rgba).clone());
+            }
+
+            re_viewer_context::ScreenshotTarget::SaveToPathFromFileDialog => {
+                use image::ImageEncoder as _;
+                let mut png_bytes: Vec<u8> = Vec::new();
+                if let Err(err) = image::codecs::png::PngEncoder::new(&mut png_bytes).write_image(
+                    rgba.as_raw(),
+                    rgba.width() as u32,
+                    rgba.height() as u32,
+                    image::ExtendedColorType::Rgba8,
+                ) {
+                    re_log::error!("Failed to encode screenshot as PNG: {err}");
+                } else {
+                    let file_name = format!("{name}.png");
+                    self.command_sender.save_file_dialog(
+                        self.main_thread_token,
+                        &file_name,
+                        "Save screenshot".to_owned(),
+                        png_bytes,
+                    );
                 }
+            }
 
-                re_viewer_context::ScreenshotTarget::SaveToPathFromFileDialog => {
-                    use image::ImageEncoder as _;
-                    let mut png_bytes: Vec<u8> = Vec::new();
-                    if let Err(err) = image::codecs::png::PngEncoder::new(&mut png_bytes)
-                        .write_image(
-                            rgba.as_raw(),
-                            rgba.width() as u32,
-                            rgba.height() as u32,
-                            image::ExtendedColorType::Rgba8,
-                        )
-                    {
-                        re_log::error!("Failed to encode screenshot as PNG: {err}");
-                    } else {
-                        let file_name = format!("{name}.png");
-                        self.command_sender.save_file_dialog(
-                            self.main_thread_token,
-                            &file_name,
-                            "Save screenshot".to_owned(),
-                            png_bytes,
+            re_viewer_context::ScreenshotTarget::SaveToPath {
+                path: file_path,
+                max_size,
+            } => {
+                cfg_select! {
+                    target_arch = "wasm32" => {
+                        _ = max_size;
+                        re_log::error!(
+                            "Saving screenshots to a path is not supported on web. Attempted to save to: {file_path:?}"
                         );
                     }
-                }
+                    _ => {
+                        let rgba = rgba.clone();
+                        let notifier = self.pending_screenshot_notifiers.remove(&file_path);
+                        let Some(rgba_image) = image::RgbaImage::from_vec(
+                            rgba.width() as _,
+                            rgba.height() as _,
+                            bytemuck::pod_collect_to_vec(&rgba.pixels),
+                        ) else {
+                            re_log::error!("Failed to create image from screenshot data");
+                            if let Some(notifier) = notifier {
+                                notifier.call(Err(SaveScreenshotError::InvalidImageData));
+                            }
+                            return;
+                        };
 
-                re_viewer_context::ScreenshotTarget::SaveToPath(file_path) => {
-                    cfg_select! {
-                        target_arch = "wasm32" => {
-                            re_log::error!(
-                                "Saving screenshots to a path is not supported on web. Attempted to save to: {file_path:?}"
+                        let mut image = image::DynamicImage::ImageRgba8(rgba_image);
+                        if let Some(max_size) = max_size
+                            && max_size < image.width().max(image.height())
+                        {
+                            image = image.resize(
+                                max_size,
+                                max_size,
+                                image::imageops::FilterType::Triangle,
                             );
                         }
-                        _ => {
-                            let rgba = rgba.clone();
-                            let notifier = self.pending_screenshot_notifiers.remove(&file_path);
-                            let Some(rgba_image) = image::RgbaImage::from_vec(
-                                rgba.width() as _,
-                                rgba.height() as _,
-                                bytemuck::pod_collect_to_vec(&rgba.pixels),
-                            ) else {
-                                re_log::error!("Failed to create image from screenshot data");
-                                if let Some(notifier) = notifier {
-                                    notifier.call(Err(SaveScreenshotError::InvalidImageData));
-                                }
-                                return;
-                            };
 
-                            // Convert to RGB8 so it works with JPG and other formats that don't support alpha.
-                            // (There's nothing interesting in the alpha channel anyways.)
-                            let rgb_image = image::DynamicImage::ImageRgba8(rgba_image).to_rgb8();
+                        // Convert to RGB8 so it works with JPG and other formats that don't support alpha.
+                        // (There's nothing interesting in the alpha channel anyways.)
+                        let rgb_image = image.to_rgb8();
 
-                            let result = match rgb_image.save(&file_path) {
-                                Ok(()) => {
-                                    // Only show a user-facing toast for user-initiated screenshots.
-                                    if notify {
-                                        re_log::info!("Saved screenshot to {file_path:?}");
-                                    } else {
-                                        re_log::debug!("Saved screenshot to {file_path:?}");
-                                    }
-                                    Ok(())
+                        let result = match rgb_image.save(&file_path) {
+                            Ok(()) => {
+                                // Only show a user-facing toast for user-initiated screenshots.
+                                if notify {
+                                    re_log::info!("Saved screenshot to {file_path:?}");
+                                } else {
+                                    re_log::debug!("Saved screenshot to {file_path:?}");
                                 }
-                                Err(err) => {
-                                    re_log::error!(?file_path, "Failed to save screenshot: {err}");
-                                    // Image library has the bad habit of creating the file even when it fails e.g. due to unsupported format. Remove it again.
-                                    std::fs::remove_file(&file_path).ok();
-                                    Err(SaveScreenshotError::SaveToPathFailed {
-                                        path: file_path.to_string(),
-                                        reason: err.to_string(),
-                                    })
-                                }
-                            };
-
-                            if let Some(notifier) = notifier {
-                                notifier.call(result);
+                                Ok(())
                             }
+                            Err(err) => {
+                                re_log::error!(?file_path, "Failed to save screenshot: {err}");
+                                // Image library has the bad habit of creating the file even when it fails e.g. due to unsupported format. Remove it again.
+                                std::fs::remove_file(&file_path).ok();
+                                Err(SaveScreenshotError::SaveToPathFailed {
+                                    path: file_path.to_string(),
+                                    reason: err.to_string(),
+                                })
+                            }
+                        };
+
+                        if let Some(notifier) = notifier {
+                            notifier.call(result);
                         }
                     }
                 }
             }
-        } else {
-            #[cfg(not(target_arch = "wasm32"))] // no full-app screenshotting on web
-            if user_data
-                .data
-                .as_ref()
-                .is_some_and(|data| data.is::<crate::screenshotter::FullAppScreenshot>())
-            {
-                self.screenshotter.save(&self.egui_ctx, image);
-            }
-            // Ignore any other screenshot requests
         }
     }
 }
@@ -1327,7 +1404,7 @@ impl eframe::App for App {
         eframe::set_value(
             storage,
             REDAP_TOKEN_KEY,
-            &self.connection_registry.dump_tokens(),
+            &self.connections.registry.dump_tokens(),
         );
 
         // Save the blueprints
@@ -1354,23 +1431,15 @@ impl eframe::App for App {
 
     /// Called when application need to be repainted
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        ui.name_panel("Viewer");
+
         #[cfg(all(not(target_arch = "wasm32"), feature = "perf_telemetry_tracy"))]
         if let Some(tracy) = re_perf_telemetry::external::tracing_tracy::client::Client::running() {
             tracy.frame_mark();
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(capture) = &self.profile_capture {
-            if capture.is_done() {
-                if let Some(capture) = self.profile_capture.take()
-                    && let Err(err) = save_profile_trace(&capture.finish())
-                {
-                    re_log::error!("Failed to save profile trace: {err}");
-                }
-            } else {
-                ui.ctx().request_repaint();
-            }
-        }
+        PendingProfileCapture::poll(&mut self.profile_capture, ui.ctx());
 
         if let Some(seconds) = frame.info().cpu_usage {
             self.frame_time_history.add(ui.input(|i| i.time), seconds);
@@ -1397,8 +1466,9 @@ impl eframe::App for App {
             }
         }
 
-        self.server_latency_trackers
-            .update(&self.async_runtime, &self.connection_registry);
+        self.connections
+            .latency_trackers
+            .update(&self.async_runtime, &self.connections.registry);
 
         // We move the time at the very start of the frame,
         // so that we always show the latest data when we're in "follow" mode.
@@ -1423,6 +1493,8 @@ impl eframe::App for App {
         #[cfg(not(target_arch = "wasm32"))]
         if self.screenshotter.update(ui).quit {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
+            // More frames may run before the window actually closes.
+            self.store_hub = Some(store_hub);
             return;
         }
 
@@ -1606,63 +1678,70 @@ impl eframe::App for App {
                 store_stats.as_ref(),
             );
 
+            {
+                let modal = &mut self.about_modal;
+                let build_info = &self.build_info;
+                let render_state = frame.wgpu_render_state();
+                modal.ui(
+                    ui.ctx(),
+                    || {
+                        re_ui::modal::ModalWrapper::new("About Rerun")
+                            .min_width(460.0)
+                            .max_width(520.0)
+                    },
+                    |ui| crate::ui::about_rerun_ui(ui, build_info, render_state),
+                );
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let active_recording_id =
+                    store_context.as_ref().map(|ctx| ctx.recording_store_id());
+                let modal = &mut self.debug_tools_modal;
+                let app_options = &mut self.state.app_options;
+                let command_sender = &self.command_sender;
+                let max_height = (ui.ctx().content_rect().height() - 64.0).max(320.0);
+                modal.ui(
+                    ui.ctx(),
+                    || {
+                        re_ui::modal::ModalWrapper::new("Debug tools")
+                            .min_width(560.0)
+                            .max_width(720.0)
+                            .max_height(max_height)
+                            .scrollable([false, true])
+                    },
+                    |ui| {
+                        crate::ui::debug_tools_ui(
+                            ui,
+                            app_options,
+                            active_recording_id,
+                            command_sender,
+                        );
+                    },
+                );
+            }
+
             if self.custom_window_frame() {
                 ui::paint_custom_window_frame(ui);
             }
 
-            let selected_redap_server = if let Some(Item::RedapServer(origin)) =
-                self.state.selection_state.selected_items().single_item()
-            {
-                Some(origin.clone())
-            } else {
-                None
-            };
+            let commands = self.command_context(storage_context.hub, store_context.as_ref());
+            let cmd_env = &commands.environment;
 
-            let active_recording_id = store_context
-                .as_ref()
-                .map(|ctx| ctx.recording_store_id().clone());
-
-            // The Redap entry currently being viewed (if any), so its commands (e.g. refresh)
-            // are offered in the command palette.
-            let current_redap_entry = match self.state.navigation.current() {
-                Route::RedapEntry {
-                    origin,
-                    entry_id,
-                    kind: _,
-                } => Some((origin.clone(), *entry_id)),
-                _ => None,
-            };
-
-            let cmd_env = re_ui::CommandEnvironment {
-                recording: active_recording_id.clone(),
-                has_editable_redap_server: selected_redap_server
-                    .as_ref()
-                    .is_some_and(|origin| !self.state.redap_servers.is_internal_server(origin)),
-                redap_server: selected_redap_server,
-                redap_entry: current_redap_entry,
-            };
+            #[cfg(target_os = "macos")]
+            if self.uses_native_menu() {
+                crate::native_menu::update(ui.ctx(), &commands);
+            }
 
             // Handle keyboard shortcuts, now that we have a live `CommandEnvironment`:
             {
-                use re_ui::{
-                    RecordingCommandSender as _, RedapServerCommandSender as _,
-                    TableCommandSender as _,
-                };
+                use re_ui::RecordingCommandSender as _;
 
                 // Non-timeline shortcuts, resolved against the current environment:
-                if let Some(resolved) = re_ui::listen_for_kb_shortcuts(ui.ctx(), &cmd_env) {
-                    match resolved {
-                        re_ui::ResolvedCommand::Ui(cmd) => self.command_sender.send_ui(cmd),
-                        re_ui::ResolvedCommand::Recording(cmd) => {
-                            self.command_sender.send_recording_command(cmd);
-                        }
-                        re_ui::ResolvedCommand::RedapServer(cmd) => {
-                            self.command_sender.send_redap_server_command(cmd);
-                        }
-                        re_ui::ResolvedCommand::Table(cmd) => {
-                            self.command_sender.send_table_command(cmd);
-                        }
-                    }
+                if let Some(bound) = re_ui::listen_for_kb_shortcuts(ui.ctx(), cmd_env)
+                    .and_then(|command| commands.resolve(command.kind()))
+                {
+                    self.command_sender.send_command(bound);
                 }
 
                 // Timeline shortcuts (space/arrows/home/end) were consumed early in
@@ -1673,8 +1752,7 @@ impl eframe::App for App {
                     data.remove::<re_ui::RecordingCommandKind>(key);
                     kind
                 });
-                if let Some(cmd) = pending_timeline.and_then(|kind| kind.for_environment(&cmd_env))
-                {
+                if let Some(cmd) = pending_timeline.and_then(|kind| kind.for_environment(cmd_env)) {
                     self.command_sender.send_recording_command(cmd);
                 }
             }
@@ -1682,21 +1760,11 @@ impl eframe::App for App {
             let mut cmd_palette_provider = crate::command_palette::CommandPaletteProviderImpl {
                 recording: store_context.as_ref().map(|ctx| ctx.recording()),
                 redap_servers: &self.state.redap_servers,
-                cmd_env,
+                commands,
             };
             if let Some(cmd) = self.cmd_palette.show(ui.ctx(), &mut cmd_palette_provider) {
                 match cmd {
-                    CommandPaletteAction::UiCommand(cmd) => {
-                        self.command_sender.send_ui(cmd);
-                    }
-                    CommandPaletteAction::RecordingCommand(cmd) => {
-                        use re_ui::RecordingCommandSender as _;
-                        self.command_sender.send_recording_command(cmd);
-                    }
-                    CommandPaletteAction::RedapServerCommand(cmd) => {
-                        use re_ui::RedapServerCommandSender as _;
-                        self.command_sender.send_redap_server_command(cmd);
-                    }
+                    CommandPaletteAction::Command(cmd) => self.command_sender.send_command(cmd),
                     CommandPaletteAction::SelectEntityPath(entity_path) => {
                         self.command_sender
                             .send_system(SystemCommand::set_selection(Item::from(
@@ -1723,12 +1791,8 @@ impl eframe::App for App {
                             kind: re_viewer_context::RedapEntryKind::Entry(entry_id),
                         });
                     }
-                    CommandPaletteAction::TableCommand(cmd) => {
-                        use re_ui::TableCommandSender as _;
-                        self.command_sender.send_table_command(cmd);
-                    }
                     CommandPaletteAction::OpenUrl(url) => {
-                        match ViewerOpenUrl::parse_with_options(
+                        match ViewerUrl::parse_with_options(
                             url.as_str(),
                             &re_data_source::FromUriOptions {
                                 accept_extensionless_http: true,
@@ -1782,55 +1846,17 @@ impl eframe::App for App {
         // Return the `StoreHub` to the Viewer so we have it on the next frame
         self.store_hub = Some(store_hub);
 
-        {
-            // Check for returned screenshots:
-            let screenshots: Vec<_> = ui.input(|i| {
-                i.raw
-                    .events
-                    .iter()
-                    .filter_map(|event| {
-                        if let egui::Event::Screenshot {
-                            image, user_data, ..
-                        } = event
-                        {
-                            Some((image.clone(), user_data.clone()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            });
-
-            for (image, user_data) in screenshots {
-                self.process_screenshot_result(&image, &user_data);
-            }
+        while let Ok((info, image)) = self.screenshot_rx.try_recv() {
+            self.process_screenshot_result(&image, info);
         }
+
+        self.state.audio_output.finish_ui_pass(ui.will_discard());
     }
 
     #[cfg(target_arch = "wasm32")]
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(&mut *self)
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn save_profile_trace(view: &re_tracing::reexports::puffin::FrameView) -> anyhow::Result<()> {
-    let Some(path) = rfd::FileDialog::new()
-        .set_file_name("rerun.puffin")
-        .set_title("Save profile trace")
-        .add_filter("Puffin profile", &["puffin"])
-        .save_file()
-    else {
-        re_log::info!("Profile trace capture cancelled by user.");
-        return Ok(());
-    };
-
-    let file = std::fs::File::create(&path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    view.write(&mut writer)?;
-
-    re_log::info!("Saved profile trace to {}", path.display());
-    Ok(())
 }
 
 impl MemUsageTreeCapture for App {
@@ -1842,7 +1868,7 @@ impl MemUsageTreeCapture for App {
         node.add("store_hub", self.store_hub.capture_mem_usage_tree());
         node.add(
             "connection_registry",
-            self.connection_registry.capture_mem_usage_tree(),
+            self.connections.registry.capture_mem_usage_tree(),
         );
         node.add(
             "store_subscribers",

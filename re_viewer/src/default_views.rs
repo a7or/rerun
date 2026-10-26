@@ -26,6 +26,12 @@ fn populate_view_class_registry_with_builtin(
     fallback_registry: &mut FallbackProviderRegistry,
 ) -> Result<(), ViewClassRegistryError> {
     re_tracing::profile_function!();
+    #[cfg(feature = "audio")]
+    view_class_registry.add_class::<re_view_audio::AudioView>(
+        reflection,
+        app_options,
+        fallback_registry,
+    )?;
     view_class_registry.add_class::<re_view_bar_chart::BarChartView>(
         reflection,
         app_options,
@@ -118,7 +124,7 @@ mod tests {
         for egui_theme in [egui::Theme::Light, egui::Theme::Dark] {
             for entry in view_class_registry.iter_registry() {
                 let class = &entry.class;
-                let mut state = class.new_state();
+                let state = class.new_state();
                 let space_origin = EntityPath::root();
 
                 let mut did_run = false;
@@ -131,15 +137,21 @@ mod tests {
                         test_context.run_ui(ui, |viewer_ctx, ui| {
                             ui.set_min_size(Vec2::new(400.0, 300.0));
                             ui.list_item_scope(entry.identifier, |ui| {
-                                class
-                                    .selection_ui(
-                                        viewer_ctx,
-                                        ui,
-                                        state.as_mut(),
-                                        &space_origin,
-                                        view_id,
-                                    )
-                                    .expect("Failed to run selection_ui");
+                                let view_ctx = re_viewer_context::ViewContext {
+                                    viewer_ctx,
+                                    view_id,
+                                    view_class_identifier: entry.identifier,
+                                    space_origin: &space_origin,
+                                    view_state: state.as_ref(),
+                                    query_result: viewer_ctx.lookup_query_result(view_id),
+                                };
+                                let selection_ui = class.selection_ui(&view_ctx);
+                                if let Some(properties_ui) = selection_ui.blueprint_properties {
+                                    properties_ui(ui, &view_ctx)
+                                        .expect("Failed to run selection_ui");
+                                } else {
+                                    re_view::view_properties_ui(&view_ctx, ui);
+                                }
                                 did_run = true;
                             });
                         });

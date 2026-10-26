@@ -19,7 +19,7 @@ Using an expressive API, Lenses allow you to:
 3. Wrangle the values stored in individual components
 
 Lenses are available in the Rust SDK using `LensesSink` or directly on a `Chunk` via the `ChunkExt` trait.
-In Python, Lenses can be applied to chunks directly or as a pipeline step in the `ChunkStream` API.
+In Python, Lenses can be applied to chunks directly or as a pipeline step via `LazyChunkStream.lenses()` in the [Chunk Processing API](../logging-and-ingestion/chunk-processing-api.md).
 
 Internally, Rerun uses lenses to implement large parts of our data importers, the MCAP importer is one example of this.
 
@@ -106,8 +106,10 @@ The basic syntax elements are:
 * `.field` - access a named field (e.g. `.my.nested.struct.field`)
 * `.sequence[]` - iterate over all elements in a sequence
 * `.sequence[].x` - access a field on each element of a sequence
+* `.sequence[N]` - select the element at index `N`, starting at 0
 * `.optional_field?` - access an optional field, skipping missing values
 * `pack(.x, .y, .z)` - pack several same-typed fields into a fixed-size list (see below)
+* `"foo"` - emit a string constant once per input value
 
 These can be composed using pipes (`|`) as described below.
 

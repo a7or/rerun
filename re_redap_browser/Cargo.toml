@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.96"
 name = "re_redap_browser"
-version = "0.38.1"
+version = "0.40.0"
 authors = ["rerun.io <opensource@rerun.io>"]
 build = false
 include = [
@@ -65,90 +65,96 @@ features = [
 default-features = false
 
 [dependencies.egui]
-version = "0.36.2"
+version = "0.37.0"
 features = [
     "callstack",
     "color-hex",
     "rayon",
 ]
+default-features = false
 
 [dependencies.egui_extras]
-version = "0.36.2"
+version = "0.37.0"
 features = [
     "http",
     "image",
     "serde",
     "svg",
 ]
+default-features = false
 
 [dependencies.futures]
-version = "0.3.33"
+version = "0.3.34"
 
 [dependencies.itertools]
 version = "0.15.0"
 
 [dependencies.re_async]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_auth]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_backoff]
-version = "0.38.1"
+version = "0.40.0"
+default-features = false
+
+[dependencies.re_catalog_client]
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_dataframe_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_datafusion]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_error]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_format]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_log]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_log_types]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_mutex]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_protos]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_quota_channel]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_redap_client]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_ui]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_uri]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.re_viewer_context]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [dependencies.serde]
@@ -169,9 +175,26 @@ version = "2.5"
 [dependencies.webbrowser]
 version = "1.2"
 
+[dev-dependencies.egui_kittest]
+version = "0.37.0"
+features = [
+    "eframe",
+    "snapshot",
+    "wgpu",
+]
+default-features = false
+
 [dev-dependencies.re_ui]
-version = "0.38.1"
+version = "0.40.0"
 features = ["testing"]
+default-features = false
+
+[dev-dependencies.tokio]
+version = "1.53"
+features = [
+    "macros",
+    "rt",
+]
 default-features = false
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.rfd]
@@ -179,8 +202,11 @@ version = "0.17.2"
 features = ["xdg-portal"]
 default-features = false
 
+[target."cfg(rerun_workspace_hack)".dependencies.re_workspace_hack]
+version = "0.0.0"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.re_web]
-version = "0.38.1"
+version = "0.40.0"
 default-features = false
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.uuid]
@@ -351,7 +377,10 @@ priority = -1
 [lints.rust.unexpected_cfgs]
 level = "deny"
 priority = 0
-check-cfg = ["cfg(TODO)"]
+check-cfg = [
+    "cfg(TODO)",
+    "cfg(rerun_workspace_hack)",
+]
 
 [lints.rustdoc]
 all = "warn"

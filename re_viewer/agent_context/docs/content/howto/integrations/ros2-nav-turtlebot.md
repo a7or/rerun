@@ -2,16 +2,15 @@
 title: Use Rerun with ROS 2
 order: 300
 ogImageUrl: /docs-media/og-howto-ros.jpg
-description: Rerun does not yet have native ROS support, but many of the concepts in ROS and Rerun line up fairly well. In this guide, you will learn how to write a simple ROS 2 Python node that subscribes to some common ROS topics and logs them to Rerun.
+description: Write a ROS 2 Python node that subscribes to common topics and logs them to Rerun. For recorded bags, see the MCAP pages.
 ---
 
-Rerun does not yet have native ROS support, but many of the concepts in ROS and Rerun
-line up fairly well. In this guide, you will learn how to write a simple ROS 2 Python node
-that subscribes to some common ROS topics and logs them to Rerun.
+This guide is for logging from a running ROS 2 system.
+You will write a simple ROS 2 Python node that subscribes to some common ROS topics and logs them to Rerun.
 
-For information on future plans to enable more native ROS support
-see [#1537](https://github.com/rerun-io/rerun/issues/1537).
-In case you have recorded data, you may also want to read our documentation on [using MCAP](../../howto/logging-and-ingestion/mcap.md).
+If your data is already recorded as MCAP, you do not need a node.
+Rerun opens MCAP files directly and decodes standard ROS 2 messages natively, see [Working with MCAP](../../howto/logging-and-ingestion/mcap.md).
+To record straight to RRD instead, try the experimental [`rosbag2_storage_rrd`](https://github.com/rerun-io/rosbag2_storage_rrd) plugin (`ros2 bag record -s rrd`).
 
 The following is primarily intended for existing ROS 2 users. It will not spend much time
 covering how to use ROS 2 itself. If you are a Rerun user that is curious about ROS,
@@ -53,7 +52,7 @@ At a very high level, for each ROS message we are interested in, we create a
 subscriber with a callback that does some form of data conversion and then logs the data to Rerun.
 In most cases, this conversion is either trivial or easy to do with utilities from the ROS ecosystem.
 
-For simplicity, this example uses the rosclpy `MultiThreadedExecutor` and `ReentrantCallbackGroup` for each topic. This
+For simplicity, this example uses the rclpy `MultiThreadedExecutor` and `ReentrantCallbackGroup` for each topic. This
 allows each callback thread to do TF lookups without blocking the other incoming messages. More advanced ROS execution
 models and using asynchronous TF lookups are outside the scope of this guide.
 

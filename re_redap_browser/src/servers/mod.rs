@@ -6,14 +6,15 @@ use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion::sql::TableReference;
 use egui::{Frame, Margin, RichText};
 use re_async::AsyncRuntimeHandle;
+use re_catalog_client::{AssetLayer, AssetRegistrationError};
 use re_dataframe_ui::TableCellKind;
 use re_log_types::EntryId;
 use re_log_types::external::re_types_core::SegmentId;
 use re_protos::cloud::v1alpha1::EntryKind;
 use re_quota_channel::send_crossbeam;
 use re_redap_client::{
-    AssetLayer, AssetRegistrationError, ClientCredentialsError, ConnectionHandle,
-    ConnectionRegistryHandle, CredentialSource, Credentials,
+    ClientCredentialsError, ConnectionHandle, ConnectionRegistryHandle, CredentialSource,
+    Credentials,
 };
 use re_ui::alert::Alert;
 use re_ui::{UiExt as _, icons};
@@ -23,16 +24,19 @@ use re_viewer_context::{
     SystemCommandSender as _, TableReference as ViewerTableReference, ViewStates,
 };
 
+use crate::asset_coverage_modal::{AssetCoverageModal, AssetTarget};
 use crate::asset_registration::{AssetRegistrations, AssetUnregistrations};
 use crate::asset_source_modal::AssetSourceModal;
 use crate::context::Context;
 use crate::entries::{Entries, Entry, Table};
-use crate::entry_meta::EntryMetaQuery;
-use crate::register_asset_modal::{AssetTarget, RegisterAssetModal};
+use crate::entry_meta::{DatasetSegments, EntryMetaQuery};
+use crate::register_asset_modal::RegisterAssetModal;
 use crate::server_modal::{LoginFlow, LoginFlowResult, ServerModal, ServerModalMode};
 use crate::unregister_asset_modal::UnregisterAssetModal;
 
 mod dataset;
+
+pub use dataset::PILL_MARGIN;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ServerKind {
@@ -265,7 +269,7 @@ impl Server {
             },
         )
         .title(self.origin().host.to_string())
-        .additional_column_heuristics(|desc, mut column| {
+        .additional_column_heuristics(|_layout, desc, mut column| {
             // TODO(andreas): we should not operate on display name as much since this can be very brittle.
             // TODO(andreas): Most of these heuristics could just be always applied so all tables profit from then.
 
@@ -596,6 +600,8 @@ pub struct RedapServers {
 
     register_asset_modal_ui: RegisterAssetModal,
 
+    asset_coverage_modal_ui: AssetCoverageModal,
+
     asset_source_modal_ui: AssetSourceModal,
 
     unregister_asset_modal_ui: UnregisterAssetModal,
@@ -651,6 +657,7 @@ impl Default for RedapServers {
             command_receiver,
             server_modal_ui: Default::default(),
             register_asset_modal_ui: Default::default(),
+            asset_coverage_modal_ui: Default::default(),
             asset_source_modal_ui: Default::default(),
             unregister_asset_modal_ui: Default::default(),
             inline_login_flow: None,
@@ -696,6 +703,12 @@ pub enum Command {
 
     /// Open a modal to register an asset with a dataset.
     OpenRegisterAssetModal(AssetTarget),
+
+    /// Open a modal to pick which segments of a dataset load an asset.
+    OpenAssetCoverageModal {
+        target: AssetTarget,
+        asset_id: SegmentId,
+    },
 
     /// Open a modal asking whether to unregister an asset.
     OpenUnregisterAssetModal {
@@ -883,6 +896,9 @@ impl RedapServers {
     ///
     /// A dataset's failed asset registrations go too, since asking the server again is how the user
     /// gets rid of a stale answer. Pending ones stay: only the server can end those.
+    ///
+    /// An entry the listing does not hold makes the listing refetch instead, unless a fetch is
+    /// already pending.
     pub fn refresh_entry(
         &mut self,
         origin: &re_uri::Origin,
@@ -896,6 +912,7 @@ impl RedapServers {
         server.asset_registrations.clear_failed(entry_id);
 
         let Some(entry) = server.find_entry(entry_id) else {
+            server.refresh_entries();
             return;
         };
 
@@ -908,6 +925,29 @@ impl RedapServers {
             egui_ctx.clone(),
             server.tables_session_ctx.clone(),
             TableReference::bare(entry.name().to_string()),
+        );
+    }
+
+    /// Fetch the entry's current default table blueprint.
+    ///
+    /// The new default only replaces the table's active blueprint if that has no edits.
+    pub fn refresh_entry_default_blueprint(
+        &self,
+        origin: &re_uri::Origin,
+        entry_id: EntryId,
+        command_sender: &re_viewer_context::CommandSender,
+    ) {
+        let Some(server) = self.servers.get(origin) else {
+            return;
+        };
+        let Some(entry) = server.find_entry(entry_id) else {
+            return;
+        };
+        crate::entries::refresh_default_table_blueprint(
+            server.connection.clone(),
+            entry,
+            &server.runtime,
+            command_sender,
         );
     }
 
@@ -1066,6 +1106,15 @@ impl RedapServers {
             Command::OpenRegisterAssetModal(target) => {
                 self.register_asset_modal_ui.open(
                     target,
+                    connection_registry.clone(),
+                    runtime.clone(),
+                );
+            }
+
+            Command::OpenAssetCoverageModal { target, asset_id } => {
+                self.asset_coverage_modal_ui.open(
+                    target,
+                    asset_id,
                     connection_registry.clone(),
                     runtime.clone(),
                 );
@@ -1356,6 +1405,7 @@ impl RedapServers {
         &self,
         ctx: &AppContext<'_>,
         ui: &mut egui::Ui,
+        origin: &re_uri::Origin,
         active_entry: EntryId,
         kind: Option<re_viewer_context::EntryKind>,
         table_blueprints: &re_dataframe_ui::TableBlueprints,
@@ -1365,43 +1415,59 @@ impl RedapServers {
             command_sender: &self.command_sender,
         };
 
-        for server in self.servers.values() {
-            if let Some(entry) = server.find_entry(active_entry) {
-                match entry.inner() {
-                    Ok(crate::entries::EntryInner::Dataset(dataset)) => {
-                        server.dataset_entry_ui(
-                            ctx,
-                            &browser_ctx,
-                            ui,
-                            dataset,
-                            table_blueprints,
-                            view_states,
-                            kind,
-                        );
+        if self.is_entry_kind_pending(origin, active_entry) {
+            Frame::new().inner_margin(16.0).show(ui, |ui| {
+                ui.loading_indicator("Loading entry…");
+            });
+            return;
+        }
 
-                        // If we're connected twice to the same server, we will find this entry
-                        // multiple times. We avoid it by returning here.
-                        return;
-                    }
-                    Ok(crate::entries::EntryInner::Table(table)) => {
-                        server.table_entry_ui(ctx, ui, table, table_blueprints, view_states);
+        // The same server can be connected under two origins, such as `localhost` and
+        // `127.0.0.1`, with the same entry ids. The entry is shown from the server of `origin`.
+        let Some(server) = self.servers.get(origin) else {
+            return;
+        };
+        let Some(entry) = server.find_entry(active_entry) else {
+            return;
+        };
 
-                        // If we're connected twice to the same server, we will find this entry
-                        // multiple times. We avoid it by returning here.
-                        return;
-                    }
-                    Err(err) => {
-                        Frame::new().inner_margin(16.0).show(ui, |ui| {
-                            Alert::error().show_text(
-                                ui,
-                                format!("Error loading entry {}", entry.name()),
-                                Some(err.to_string()),
-                            );
-                        });
-                    }
-                }
+        match entry.inner() {
+            Ok(crate::entries::EntryInner::Dataset(dataset)) => {
+                server.dataset_entry_ui(
+                    ctx,
+                    &browser_ctx,
+                    ui,
+                    dataset,
+                    table_blueprints,
+                    view_states,
+                    kind,
+                );
+            }
+            Ok(crate::entries::EntryInner::Table(table)) => {
+                server.table_entry_ui(ctx, ui, table, table_blueprints, view_states);
+            }
+            Err(err) => {
+                Frame::new().inner_margin(16.0).show(ui, |ui| {
+                    Alert::error().show_text(
+                        ui,
+                        format!("Error loading entry {}", entry.name()),
+                        Some(err.to_string()),
+                    );
+                });
             }
         }
+    }
+
+    /// The segments of the dataset an asset modal points at, as the modal names and searches them.
+    fn asset_target_segments(
+        &self,
+        egui_ctx: &egui::Context,
+        target: &AssetTarget,
+    ) -> DatasetSegments {
+        self.servers
+            .get(&target.origin)
+            .map(|server| server.dataset_segments(egui_ctx, target.dataset_id))
+            .unwrap_or_default()
     }
 
     pub fn modals_ui(&mut self, app_ctx: &AppContext<'_>, ui: &egui::Ui) {
@@ -1422,7 +1488,46 @@ impl RedapServers {
             })
             .unwrap_or_default();
 
-        self.register_asset_modal_ui.ui(&ctx, ui, &asset_slots);
+        let register_segments = self
+            .register_asset_modal_ui
+            .target()
+            .map(|target| self.asset_target_segments(ui.ctx(), target))
+            .unwrap_or_default();
+        let stores_coverage = self
+            .register_asset_modal_ui
+            .target()
+            .and_then(|target| {
+                let server = self.servers.get(&target.origin)?;
+                Some(server.dataset_stores_coverage(ui.ctx(), target.dataset_id))
+            })
+            .unwrap_or(true);
+        let coverage_segments = self
+            .asset_coverage_modal_ui
+            .target()
+            .map(|target| self.asset_target_segments(ui.ctx(), target))
+            .unwrap_or_default();
+
+        let stored_coverage = Option::zip(
+            self.asset_coverage_modal_ui.target(),
+            self.asset_coverage_modal_ui.asset_id(),
+        )
+        .and_then(|(target, asset_id)| {
+            self.servers.get(&target.origin)?.dataset_asset_coverage(
+                ui.ctx(),
+                target.dataset_id,
+                asset_id,
+            )
+        });
+
+        self.register_asset_modal_ui.ui(
+            &ctx,
+            ui,
+            &asset_slots,
+            &register_segments,
+            stores_coverage,
+        );
+        self.asset_coverage_modal_ui
+            .ui(&ctx, ui, &coverage_segments, stored_coverage.as_ref());
         self.asset_source_modal_ui.ui(ui);
         self.unregister_asset_modal_ui.ui(&ctx, ui);
     }
@@ -1524,5 +1629,33 @@ mod tests {
             .expect("valid origin");
 
         assert!(servers.is_entry_kind_pending(&origin, EntryId::new()));
+    }
+
+    /// An entry that is newer than the listing of its server can only turn up in a new listing,
+    /// so refreshing it fetches the listing again.
+    #[tokio::test]
+    async fn refreshing_an_unknown_entry_fetches_the_entries_again() {
+        let origin = "rerun+http://localhost:51234"
+            .parse::<re_uri::Origin>()
+            .expect("valid origin");
+        let connection_registry =
+            re_redap_client::ConnectionRegistry::new_without_stored_credentials();
+        let runtime =
+            AsyncRuntimeHandle::from_current_tokio_runtime_or_wasmbindgen().expect("tokio runtime");
+        let egui_ctx = egui::Context::default();
+
+        let mut servers = RedapServers::default();
+        servers.add_internal_server(origin.clone(), &connection_registry, &runtime, &egui_ctx);
+        servers
+            .servers
+            .get_mut(&origin)
+            .expect("the server was just added")
+            .entries = crate::entries::Entries::settled_empty();
+
+        let entry_id = EntryId::new();
+        assert!(!servers.is_entry_kind_pending(&origin, entry_id));
+
+        servers.refresh_entry(&origin, entry_id, &egui_ctx);
+        assert!(servers.is_entry_kind_pending(&origin, entry_id));
     }
 }

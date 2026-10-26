@@ -36,8 +36,8 @@ Markdown files with YAML frontmatter, organized hierarchically:
 ```
 docs/content/
   index.md                        # Entry point
-  overview/                       # Installation, what is Rerun
-  getting-started/                # Quick start, data-in/out, configure viewer
+  overview/                       # What is Rerun, docs guide
+  getting-started/                # Quick start, install, project setup, data-in/out, configure viewer, train
   concepts/                       # Logging, visualization, querying
   howto/                          # Integration guides, tutorials
   reference/
@@ -72,10 +72,10 @@ ogImageUrl: <url>  # Optional: open-graph thumbnail
 
 PRs that touch `docs/content/` automatically get a Vercel preview deployment (link posted as a PR comment). For a full local preview, clone the [landing](https://github.com/rerun-io/landing) repo.
 
-Production deploys from the `docs-latest` branch. Do not push to it directly.
+Production deploys from the `docs-latest` branch, which each release force-pushes to the released commit.
 
-- **Normal flow**: Merge to `main`. If the PR has the `deploy docs` label, the commit is automatically cherry-picked to `docs-latest` (via `.github/workflows/auto_docs.yml`), which triggers a Vercel redeploy.
-- **Releases**: The release process force-pushes `main` to `docs-latest`.
+- **Normal flow**: Merge to `main`; docs changes go live with the next release (weekly).
+- **Urgent fixes**: A maintainer can cherry-pick the merged commit onto `docs-latest` by hand, which triggers a redeploy.
 - Any commits only on `docs-latest` (not on `main`) will be lost on the next release.
 
 ### Redirects
@@ -159,7 +159,7 @@ See `rerun_cpp/docs/writing_docs.md` for comment conventions.
 
 ### JS (`ref.rerun.io/docs/js/`)
 
-Built with TypeDoc via Yarn workspaces.
+Built with TypeDoc via npm workspaces.
 
 Build locally: `pixi run js-docs` / `pixi run js-docs-serve`
 

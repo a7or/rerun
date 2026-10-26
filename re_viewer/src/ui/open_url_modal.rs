@@ -1,8 +1,9 @@
 use re_ui::modal::{ModalHandler, ModalWrapper};
-use re_ui::{UICommand, UiExt as _};
-use re_viewer_context::open_url::ViewerOpenUrl;
+use re_ui::text_edit::ReTextEdit;
+use re_ui::{Size, UICommand, UiExt as _};
+use re_viewer_context::viewer_url::ViewerUrl;
 
-use crate::open_url_description::ViewerOpenUrlDescription;
+use crate::viewer_url_description::ViewerUrlDescription;
 
 #[derive(Default)]
 pub struct OpenUrlModal {
@@ -30,7 +31,7 @@ impl OpenUrlModal {
 
                     // Repeat shortcut on the right to remind users of how to open this modal quickly.
                     if !self.hide_shortcut {
-                        let shortcut_text = UICommand::OpenUrl
+                        let shortcut_text = UICommand::OpenUrlDialog
                             .formatted_kb_shortcut(ui.ctx())
                             .unwrap_or_default();
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -39,13 +40,17 @@ impl OpenUrlModal {
                     }
                 });
 
-                let edit_output = egui::TextEdit::singleline(&mut self.url)
-                    .desired_width(f32::INFINITY)
-                    .show(ui);
+                let response = ui
+                    .add(
+                        ReTextEdit::singleline(&mut self.url)
+                            .size(Size::Tiny)
+                            .desired_width(f32::INFINITY),
+                    )
+                    .accessible_name("URL");
 
                 // If we just opened the dialog, focus the text edit so user can just paste.
                 if self.just_opened {
-                    edit_output.response.request_focus();
+                    response.request_focus();
 
                     // Pasting the clipboard is a cool idea until you realize that we may just have pasted a password.
                     // We can't read the clipboard contents on the web and we don't have a nice API for that on native right now,
@@ -53,7 +58,7 @@ impl OpenUrlModal {
                     // ui.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                 }
 
-                let open_url = ViewerOpenUrl::parse_with_options(
+                let open_url = ViewerUrl::parse_with_options(
                     &self.url,
                     &re_data_source::FromUriOptions {
                         accept_extensionless_http: true,
@@ -61,10 +66,10 @@ impl OpenUrlModal {
                 );
                 let can_import = match &open_url {
                     Ok(url) => {
-                        let description = ViewerOpenUrlDescription::from_url(url);
+                        let description = ViewerUrlDescription::from_url(url);
                         if let Some(target_short) = description.target_short {
                             ui.horizontal(|ui| {
-                                ui.label(format!("{}:", description.category));
+                                ui.label(description.category);
                                 ui.strong(target_short);
                             });
                         } else {
@@ -130,10 +135,9 @@ mod tests {
         let url = Mutex::new(String::new());
 
         let mut harness = egui_kittest::Harness::builder()
+            .with_context_setup(re_ui::apply_style_and_install_loaders)
             .with_size(egui::Vec2::new(450.0, 200.0))
             .build_ui(|ui| {
-                re_ui::apply_style_and_install_loaders(ui.ctx());
-
                 modal.url = url.lock().clone();
                 modal.ui(ui);
             });

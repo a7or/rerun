@@ -5,8 +5,8 @@
 //! resulting redap segment URI, instead of importing them directly.
 //!
 //! The viewer talks to the catalog in-process via [`InternalCatalog::connection`].
-//! On native, the same handler is also served on the proxy server's port (see
-//! [`InternalCatalog::grpc_service`]) so that other local processes can reach it.
+//! On native, the same handler and its upload route are also served on the proxy server's port so
+//! that other local processes can reach it.
 //! The served endpoint is restricted to connections from the local machine.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -31,6 +31,9 @@ pub struct InternalCatalog {
     #[cfg(not(target_arch = "wasm32"))]
     handler: Arc<RerunCloudHandler>,
 
+    #[cfg(not(target_arch = "wasm32"))]
+    write_upload_route: axum::routing::MethodRouter,
+
     storage_dir: std::path::PathBuf,
 }
 
@@ -51,28 +54,30 @@ impl InternalCatalog {
         RerunCloudServiceServer::from_arc(self.handler.clone())
             .max_decoding_message_size(re_redap_client::MAX_DECODING_MESSAGE_SIZE)
     }
+
+    /// The HTTP endpoint for redeeming write grants.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_upload_route(&self) -> axum::routing::MethodRouter {
+        self.write_upload_route.clone()
+    }
 }
 
 /// Build the in-process internal catalog, addressed at the proxy server's port.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build(proxy_addr: SocketAddr) -> InternalCatalog {
     let origin = re_uri::Origin::http_local_host(proxy_addr.port());
-    let storage_dir = tempfile::Builder::new()
-        .prefix("rerun-data-")
-        .tempdir()
-        .expect("failed to create internal catalog storage directory");
-    let storage_path = storage_dir.path().to_owned();
-    let handler = Arc::new(
-        RerunCloudHandlerBuilder::new()
-            .with_storage_dir(storage_dir)
-            .build(),
-    );
+    let (handler, write_upload_route) = RerunCloudHandlerBuilder::new()
+        .build_with_write_access()
+        .expect("failed to build internal catalog");
+    let handler = Arc::new(handler);
+    let storage_dir = handler.storage_dir().to_owned();
     let connection = Connection::from_service(origin, handler.clone(), re_server::capabilities());
 
     InternalCatalog {
         connection,
         handler,
-        storage_dir: storage_path,
+        write_upload_route,
+        storage_dir,
     }
 }
 

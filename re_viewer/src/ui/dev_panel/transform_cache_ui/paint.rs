@@ -189,17 +189,14 @@ pub(super) fn scene_legend_ui(ui: &egui::Ui, scene_ui_rect: egui::Rect) {
         scene_ui_rect.top() - ui.ctx().content_rect().top() + legend_inset,
     );
 
-    egui::Area::new(ui.id().with("transform_cache_legend"))
+    egui::Area::new(ui.make_persistent_id("transform_cache_legend"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_TOP, anchor_offset)
         .show(ui.ctx(), |ui| {
             let tokens = ui.tokens();
             egui::Frame::new()
                 .fill(tokens.panel_bg_color.gamma_multiply(LEGEND_FILL_OPACITY))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    tokens.widget_noninteractive_bg_stroke,
-                ))
+                .stroke(tokens.divider_stroke)
                 .corner_radius(tokens.small_corner_radius())
                 .inner_margin(tokens.text_to_icon_padding())
                 .show(ui, |ui| {
@@ -252,7 +249,7 @@ pub(super) fn draw_transform_cache_contents(
         egui::Tooltip::always_open(
             ui.ctx().clone(),
             ui.layer_id(),
-            ui.id().with("transform_edge_tooltip"),
+            ui.make_persistent_id("transform_edge_tooltip"),
             egui::PopupAnchor::Pointer,
         )
         .at_pointer()
@@ -268,7 +265,7 @@ pub(super) fn draw_transform_cache_contents(
         egui::Tooltip::always_open(
             ui.ctx().clone(),
             ui.layer_id(),
-            ui.id().with("transform_shared_fork_tooltip"),
+            ui.make_persistent_id("transform_shared_fork_tooltip"),
             egui::PopupAnchor::Pointer,
         )
         .at_pointer()
@@ -341,7 +338,7 @@ pub(super) fn draw_transform_cache_contents(
             if highlighted {
                 tokens.focus_outline_stroke
             } else {
-                egui::Stroke::new(2.0, tokens.widget_noninteractive_bg_stroke)
+                egui::Stroke::new(2.0, tokens.divider_stroke.color)
             },
             egui::StrokeKind::Inside,
         );

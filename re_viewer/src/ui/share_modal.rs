@@ -3,13 +3,13 @@ use re_ui::list_item::PropertyContent;
 use re_ui::modal::{ModalHandler, ModalWrapper};
 use re_ui::{UiExt as _, icons};
 use re_uri::Fragment;
-use re_viewer_context::open_url::ViewerOpenUrl;
+use re_viewer_context::viewer_url::ViewerUrl;
 use re_viewer_context::{ItemCollection, Route, StoreHub, TimeControl, ViewerContext};
 
 pub struct ShareModal {
     modal: ModalHandler,
 
-    url: Option<ViewerOpenUrl>,
+    url: Option<ViewerUrl>,
     create_web_viewer_url: bool,
 
     /// Whether to show feedback that the link just has been copied to the clipboard.
@@ -41,8 +41,8 @@ impl ShareModal {
         route: &Route,
         time_ctrl: Option<&TimeControl>,
         selection: &ItemCollection,
-    ) -> anyhow::Result<ViewerOpenUrl> {
-        ViewerOpenUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
+    ) -> anyhow::Result<ViewerUrl> {
+        ViewerUrl::from_context_expanded(store_hub, route, time_ctrl, selection)
     }
 
     /// Opens the share modal with the current URL.
@@ -59,7 +59,7 @@ impl ShareModal {
     }
 
     /// Opens the share modal with the given URL.
-    fn open_with_url(&mut self, url: ViewerOpenUrl) {
+    fn open_with_url(&mut self, url: ViewerUrl) {
         self.url = Some(url);
         self.modal.open();
     }
@@ -75,22 +75,29 @@ impl ShareModal {
     ) {
         re_tracing::profile_function!();
 
-        let url_for_current_screen = Self::current_url(store_hub, route, time_ctrl, selection);
-        let enable_share_button = url_for_current_screen.is_ok() && route != &Route::welcome_page();
+        if route == &Route::welcome_page() {
+            return;
+        }
+
+        let Ok(url_for_current_screen) = Self::current_url(store_hub, route, time_ctrl, selection)
+        else {
+            return;
+        };
 
         let share_button_resp = ui
-            .add_enabled_ui(enable_share_button, |ui| ui.button("Share"))
-            .inner;
+            .add(
+                ui.image_button_widget(
+                    icons::SHARE
+                        .as_image()
+                        .fit_to_exact_size(egui::Vec2::splat(16.0)),
+                    "Share",
+                )
+                .image_tint_follows_text_color(true),
+            )
+            .on_hover_text("Share the current screen as a link");
 
-        match url_for_current_screen {
-            Err(err) => {
-                share_button_resp.on_disabled_hover_text(format!("Cannot create share URL: {err}"));
-            }
-            Ok(url) => {
-                if share_button_resp.clicked() {
-                    self.open_with_url(url);
-                }
-            }
+        if share_button_resp.clicked() {
+            self.open_with_url(url_for_current_screen);
         }
     }
 
@@ -129,11 +136,13 @@ impl ShareModal {
                     // TODO(andreas): This is slightly glitchy: you can still type and we forget about it immediately.
                     // Ideally we'd keep this interactive but don't allow text edits, but `TextEdit` doesn't have this option yet.
                     let mut url_for_text_edit = url_string.clone();
-                    egui::TextEdit::singleline(&mut url_for_text_edit)
-                        .hint_text("<can't share link>") // No known way to get into this situation.
-                        .text_color(ui.style().visuals.strong_text_color())
-                        .desired_width(f32::INFINITY) // Take up the entire space.
-                        .show(ui);
+                    re_ui::text_edit::text_edit_scope(ui, |ui| {
+                        egui::TextEdit::singleline(&mut url_for_text_edit)
+                            .hint_text("<can't share link>") // No known way to get into this situation.
+                            .text_color(ui.style().visuals.strong_text_color())
+                            .desired_width(f32::INFINITY) // Take up the entire space.
+                            .show(ui);
+                    });
 
                     url_string
                 };
@@ -232,7 +241,7 @@ const MIN_TOGGLE_WIDTH_RH: f32 = 120.0;
 fn url_settings_ui(
     ctx: Option<&ViewerContext<'_>>,
     ui: &mut egui::Ui,
-    url: &mut ViewerOpenUrl,
+    url: &mut ViewerUrl,
     create_web_viewer_url: &mut bool,
 ) {
     ui.list_item_flat_noninteractive(PropertyContent::new("Link format").value_fn(|ui, _| {
@@ -363,7 +372,7 @@ mod tests {
     use re_log_types::external::re_tuid;
     use re_log_types::{AbsoluteTimeRangeF, TimeCell};
     use re_test_context::TestContext;
-    use re_viewer_context::open_url::ViewerOpenUrl;
+    use re_viewer_context::viewer_url::ViewerUrl;
     use re_viewer_context::{Item, ItemCollection, Route, TimeControlCommand};
 
     use crate::ui::ShareModal;
@@ -403,10 +412,9 @@ mod tests {
         }
 
         let mut harness = egui_kittest::Harness::builder()
+            .with_context_setup(re_ui::apply_style_and_install_loaders)
             .with_size(egui::Vec2::new(500.0, 300.0))
             .build_ui(|ui| {
-                re_ui::apply_style_and_install_loaders(ui.ctx());
-
                 test_ctx.run(ui.ctx(), |ctx| {
                     modal.lock().ui(Some(ctx), ui, None);
                 });
@@ -415,7 +423,7 @@ mod tests {
             });
         harness.snapshot("share_modal__server_url");
 
-        modal.lock().url = Some(ViewerOpenUrl::RedapDataset(re_uri::DatasetUri {
+        modal.lock().url = Some(ViewerUrl::RedapDataset(re_uri::DatasetUri {
             origin: origin.clone(),
             dataset_id,
             resource: re_uri::DatasetResource::Segments,
@@ -439,7 +447,7 @@ mod tests {
 
         harness.run();
 
-        modal.lock().url = Some(ViewerOpenUrl::RedapDataset(re_uri::DatasetUri {
+        modal.lock().url = Some(ViewerUrl::RedapDataset(re_uri::DatasetUri {
             origin: origin.clone(),
             dataset_id,
             resource: re_uri::DatasetResource::Segments,
